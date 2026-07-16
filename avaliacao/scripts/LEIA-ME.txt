@@ -1,0 +1,34 @@
+PASTA AVALIACAO/SCRIPTS
+=======================
+- gerar_dataset_avaliacao.py: gera casos, gabaritos, CSV/JSONL e, quando
+  solicitado, chamados no GLPI.
+- gerar_dataset_v3.py: gera e valida o corpus lógico V3 de 1.200 tickets, sem
+  chamar GLPI, n8n ou LLM; separa as realizações em partições físicas.
+- validar_dataset.py: verifica isolamento, referências, duplicatas, distribuição
+  opcional e vazamento entre splits.
+- executar_avaliacao.py: aplica os gates de piloto, calibração e benchmark.
+- conferir_gabarito.py: confere um `run_id` isolado e calcula métricas; no modo
+  `test-only`, atua como oráculo determinístico externo de teste somente depois
+  da persistência da predição, com trilha separada e sem identidade humana. Os
+  arquivos opcionais de especialistas/adjudicação são uma etapa futura distinta
+  e nunca são satisfeitos pelo clique automático.
+- calibrar_vazao.py: repete e randomiza configurações, warm-up, concorrência e
+  percentis p50/p95/p99 da fila.
+- calibrar_limiar.py: calibra limiares independentes para classificação e
+  deduplicação somente no piloto adjudicado; separa abstenção da classe
+  semântica TRIAGEM_MANUAL e nunca converte baixa confiança em NAO_DUPLICADO.
+- treinar_modelo_local.py: treina o candidato local TF-IDF + embeddings
+  opcionais + regressão logística calibrada, com split agrupado, bloqueio de
+  TESTE/benchmark/primary33 e bundle joblib acompanhado de manifesto e hashes.
+- executar_demo_off.py: executa três cenários controlados com equipe DEMO
+  indisponível, recusa fila não vazia e restaura a configuração padrão.
+- comparar_baselines.py: compara regras, maioria, TF-IDF/LogReg, similaridade
+  cosseno e predições externas, com `challenge_only`, bootstrap e McNemar.
+- estatistica.py: bootstrap episódico e McNemar exato.
+- planejar_amostra.py: suporte por classe e poder aproximado para McNemar.
+- sincronizar_manifesto.py: valida identidade entre prompts, schemas, JSONs,
+  modelo, opções, seed e hashes.
+- validar_rotulos_especialistas.py: exporta o piloto cego e calcula concordância,
+  kappa e alterações após dois especialistas/adjudicação.
+- gerar_diagnostico_operacional.py: extrai tentativas, fila, dead letter, tokens
+  e gates, sempre marcando a saída como diagnóstico não científico.

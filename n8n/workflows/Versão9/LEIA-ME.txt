@@ -1,0 +1,13 @@
+PASTA N8N/WORKFLOWS/VERSAO 9
+============================
+
+- validate_v9_static.py: valida builders, JSONs, grafo, schema e configuração.
+
+Exports:
+- V9-WF01-Sincronizador.json: sincronização GLPI -> PostgreSQL.
+- V9-WF02-Triagem.json: worker interno de deduplicação.
+- V9-WF03-Classificacao.json: classificação e encaminhamento.
+- V9-WF04-Decisao-Fiscal.json: decisões de duplicidade pelo fiscal.
+- V9-WF05-Metricas.json: observabilidade e avaliação.
+- V9-WF06-Fila-IA.json: webhook público, fila, lease, backoff e telemetria.
+

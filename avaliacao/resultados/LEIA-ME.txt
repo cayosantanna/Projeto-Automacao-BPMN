@@ -1,0 +1,47 @@
+PASTA AVALIACAO/RESULTADOS
+==========================
+
+Reúne saídas experimentais e diagnósticos claramente identificados.
+
+Cada nova execução cria uma pasta identificada pelo `run_id`, contendo dataset,
+manifesto congelado, predições e relatórios. Artefatos com os prefixos
+`diagnostico_` ou `baseline_v2_preliminar` não são resultados confirmatórios e
+não podem ser apresentados como eficácia do Gemini.
+
+O arquivo `resultados_preliminares_2026-07-10.md` registra o que já pode e o que
+ainda não pode ser concluído. Um resultado final V3 exige gabarito adjudicado,
+calibração aprovada, auditoria humana e `run_id` concluído.
+
+`resultados_tecnicos_2026-07-14.md` e
+`contrato_provedores_2026-07-14.json` documentam a integração multi-modelo e o
+smoke test ponta a ponta. Ambos são diagnósticos técnicos, não métricas de
+eficácia.
+
+`contrato_provedores_2026-07-15.json` inclui o papel operacional
+`FREE_CONTINGENCY` (`gemini-3.1-flash-lite`). O sucesso de contrato de um modelo
+não prova menor erro decisório; a eficácia de cada modelo exige execução fixa,
+sem fallback, em `run_id` próprio.
+
+`benchmark_embedding_pytorch_fp32_2026-07-15.json` consolida o ensaio técnico
+de 1, 2 e 4 threads do Granite Embedding. Mede somente o componente de
+embedding, não eficácia nem latência ponta a ponta.
+
+`treino-local-pytorch-fp32-v1.1.0-conservador-20260715` contém o bundle e o
+manifesto do bundle candidato local conservador congelado. O bundle está
+calibrado e marcado `evaluation_eligible=true`; o pipeline completo ainda exige
+regressão e freeze dos adaptadores/gates/workflows. O manifesto mantém
+`scientifically_validated=false` e `scientific_result=false`; suas métricas são
+internas ao desenvolvimento sintético.
+
+`ablacao-tfidf-v1.1.0-20260715` repete split, seed e pipeline sem o Granite para
+comparar TF-IDF isolado com o híbrido. É ablação interna sintética, não
+benchmark final.
+
+A decisão de 15/07/2026 permite testes automatizados contra o gabarito
+sintético sem dupla revisão nesta etapa. Esses relatórios devem ser rotulados
+como concordância sintética e não podem ser promovidos a eficácia real. As
+confirmações humanas permanecem nos workflows; o oráculo determinístico externo
+de teste apenas percorre as transições depois do registro da predição e não
+constitui revisão humana ou validação externa. Consulte
+`docs/auditoria_amostral_v4.md` para as metas do corpus de aproximadamente
+2.078 chamados na expansão futura V4.1; nenhum caso novo é gerado agora.
