@@ -58,6 +58,7 @@ class TestGatewayMultimodelo(unittest.TestCase):
                 "const roles = ['LOCAL','SECONDARY'];",
                 js,
             )
+            self.assertIn("if (role === 'LOCAL') return [...roles];", js)
             self.assertIn("envValue('IA_FIXED_MODEL_ROLE','LOCAL')", js)
             self.assertIn(
                 "supportedRoles.includes(requestedRole) ? requestedRole : 'LOCAL'",

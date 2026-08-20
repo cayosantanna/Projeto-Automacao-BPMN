@@ -14,7 +14,7 @@ from helpers import sanitize_workflow_secrets
 
 DIR = Path(__file__).resolve().parent
 EXPECTED_NAME = 'V9 - WF01 Sincronizador'
-SNAPSHOT_SHA256 = "8a636eef1d320c9bd2f8cc7b4dfa8a1b452f78f88bd94449b24c309f6187cce7"
+SNAPSHOT_SHA256 = "8b476a8f4dec82ba87c7a4dd5bddf5a1cc5b54a464b626fd157529664dbe5480"
 OUTPUT_FILES = ['V9-WF01-Sincronizador.json']
 
 WORKFLOW = {'name': 'V9 - WF01 Sincronizador',
@@ -1006,7 +1006,7 @@ WHERE status_num = 1
     _ensure_node(
         {
             "parameters": {
-                "jsCode": "const key = String((typeof process !== 'undefined' && process.env.GLPI_WEBHOOK_KEY) || ''); const tickets = Array.isArray($json.tickets) ? $json.tickets : []; return tickets.map(t => ({json:{...t, chamado:{id:Number(t.id || t.ticket_id), status_num:1, status_nome:'Novo', source:'wf01-sync', evento:'ticket.add', evento_criacao:true}, webhook_key:key, key}}));"
+                "jsCode": "const key = (() => { const value = String((typeof process !== 'undefined' && process.env.GLPI_WEBHOOK_KEY) || '').trim(); if (!value || value === 'CHANGE_ME') throw new Error('GLPI_WEBHOOK_KEY ausente'); return value; })(); const tickets = Array.isArray($json.tickets) ? $json.tickets : []; return tickets.map(t => ({json:{...t, chamado:{id:Number(t.id || t.ticket_id), status_num:1, status_nome:'Novo', source:'wf01-sync', evento:'ticket.add', evento_criacao:true}, webhook_key:key, key}}));"
             },
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,

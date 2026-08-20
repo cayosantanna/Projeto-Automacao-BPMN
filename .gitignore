@@ -1,56 +1,17 @@
-# Segredos e configurações locais
-.env
-.env.*
-.env.local
-api_key.txt
-**/api_key.txt
-!.env.example
-**/.env
-**/.env.*
-!**/.env.example
-
-# Artefatos reproduzíveis do Python
 __pycache__/
 **/__pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.coverage
-htmlcov/
-
-# Ambientes locais e saídas transitórias
 .venv/
 venv/
-playwright-report/
-test-results/
-*.tmp
-*.bak
-*~
 *.sqlite
 *.sqlite-*
 *.sqlite3
 *.sqlite3-*
 *.db
 *.db-*
-*.log
-*.pid
-*.pid.*
-
-
-# Copias de seguranca locais
-backups/
-
-# Modelos e binarios grandes obtidos de fontes publicas
 local_ai/models/**
 !local_ai/models/manifest.json
-local_ai/runtime/**
-
-# Dados institucionais com redistribuição não autorizada
-avaliacao/datasets/desenvolvimento_local_v1.jsonl
-avaliacao/datasets/desenvolvimento_local_v1_manifest.json
-
-# Resultados, evidencias e planilhas geradas localmente
-outputs/
-avaliacao/resultados/**
-!avaliacao/resultados/LEIA-ME.txt
+backups/

@@ -2,6 +2,9 @@
 param(
     [switch]$WithExtractor,
     [switch]$SkipHashVerification,
+    [string]$HybridManifest = '',
+    [ValidateRange(1, 4)][int]$CpuThreads = 4,
+    [ValidateRange(1, 16)][int]$MaxEmbedBatch = 4,
     [ValidateRange(10, 180)][int]$ServiceStartupTimeoutSeconds = 120,
     [ValidateRange(30, 300)][int]$ExtractorStartupTimeoutSeconds = 120
 )
@@ -18,7 +21,13 @@ if ([string]::IsNullOrWhiteSpace($token)) {
 }
 
 $configuredHybrid = Get-DotEnvValue -Path $N8nEnvPath -Name 'LOCAL_AI_HYBRID_MANIFEST'
-$hybridManifest = Resolve-LocalAiPath -ConfiguredValue $configuredHybrid -DefaultPath (Join-Path $LocalAiRoot 'artifacts\local_hybrid_manifest.json')
+$selectedHybrid = if ([string]::IsNullOrWhiteSpace($HybridManifest)) {
+    $configuredHybrid
+}
+else {
+    $HybridManifest
+}
+$hybridManifest = Resolve-LocalAiPath -ConfiguredValue $selectedHybrid -DefaultPath (Join-Path $LocalAiRoot 'artifacts\local_hybrid_manifest.json')
 $embeddingRevision = Get-DotEnvValue -Path $N8nEnvPath -Name 'LOCAL_AI_EMBED_MODEL_REVISION'
 if ([string]::IsNullOrWhiteSpace($embeddingRevision)) {
     throw "LOCAL_AI_EMBED_MODEL_REVISION deve estar preenchido em $N8nEnvPath."
@@ -96,8 +105,11 @@ try {
         LOCAL_AI_HOST = '0.0.0.0'
         LOCAL_AI_PORT = '8090'
         LOCAL_AI_API_TOKEN = $token
-        LOCAL_AI_CPU_THREADS = '4'
+        LOCAL_AI_CPU_THREADS = [string]$CpuThreads
         LOCAL_AI_MAX_CONCURRENT = '1'
+        # Lotes pequenos reduzem o pico temporário do encoder no computador
+        # de 8 GB sem alterar embeddings, probabilidades ou decisões.
+        LOCAL_AI_MAX_EMBED_BATCH = [string]$MaxEmbedBatch
         LOCAL_AI_DEV_FALLBACK = 'off'
         LOCAL_AI_ALLOW_MODEL_DOWNLOAD = 'false'
         LOCAL_AI_EMBED_BACKEND = 'pytorch_fp32'

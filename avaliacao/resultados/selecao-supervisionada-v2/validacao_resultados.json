@@ -1,0 +1,21 @@
+{
+  "schema": "projeto-ic-validacao-resultados-selecao-v2",
+  "validated_at": "2026-08-18T18:16:03.902331+00:00",
+  "status": "VALID",
+  "output_dir": "C:\\Users\\Cayo\\Documents\\projeto-ic\\avaliacao\\resultados\\selecao-supervisionada-v2",
+  "protocol_sha256": "359119aa924ea149732acdda549eb4cdc4994c93960eb10ab50ecab477194a1f",
+  "run_fingerprint": "5a5f6b1d1098b79f7d3f0a4e4ba4ffae1f35ade85c86ad0678cc83debccfc110",
+  "configurations": 90,
+  "classification_configurations": 35,
+  "deduplication_configurations": 55,
+  "predictions": 93990,
+  "fold_rows": 450,
+  "paired_group_comparisons": 18,
+  "paired_objective_comparisons": 100,
+  "xai_finalists": 2,
+  "latency_scenarios": 2,
+  "metrics_recomputed_from_oof": true,
+  "ranking_recomputed": true,
+  "development_only": true,
+  "confirmatory_eligible": false
+}

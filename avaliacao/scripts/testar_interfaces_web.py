@@ -89,7 +89,7 @@ async def test_n8n(browser: Browser, env: dict[str, str], output: Path, report: 
     context = await browser.new_context(viewport={"width": 1440, "height": 1000})
     page = await context.new_page()
     try:
-        response, duration = await timed_goto(page, "http://localhost:5678/")
+        response, duration = await timed_goto(page, "http://127.0.0.1:5678/")
         status = response.status if response else 0
         add_check(report, "n8n", "public_page", status == 200, f"HTTP {status}", duration)
         try:
@@ -103,7 +103,7 @@ async def test_n8n(browser: Browser, env: dict[str, str], output: Path, report: 
         add_check(report, "n8n", "login_form", sign_in, "formulário de login renderizado")
         await page.screenshot(path=output / "n8n-login.png", full_page=True)
 
-        health = await context.request.get("http://localhost:5678/healthz", timeout=15_000)
+        health = await context.request.get("http://127.0.0.1:5678/healthz", timeout=15_000)
         add_check(report, "n8n", "healthz", health.status == 200, f"HTTP {health.status}")
 
         user = env.get("N8N_BASIC_AUTH_USER", "")
@@ -141,12 +141,12 @@ async def test_n8n(browser: Browser, env: dict[str, str], output: Path, report: 
         )
         if workflow_fetch.get("status") == 401:
             session_response = await context.request.post(
-                "http://localhost:5678/rest/login",
+                "http://127.0.0.1:5678/rest/login",
                 data={"emailOrLdapLoginId": user, "password": password},
                 timeout=20_000,
             )
             workflows_response = await context.request.get(
-                "http://localhost:5678/rest/workflows", timeout=20_000
+                "http://127.0.0.1:5678/rest/workflows", timeout=20_000
             )
             try:
                 refreshed_payload = await workflows_response.json()
@@ -176,7 +176,7 @@ async def test_n8n(browser: Browser, env: dict[str, str], output: Path, report: 
                 else f"HTTP {workflow_fetch.get('status')}; ausentes: " + ", ".join(missing)
             ),
         )
-        await page.goto("http://localhost:5678/home/workflows", wait_until="domcontentloaded")
+        await page.goto("http://127.0.0.1:5678/home/workflows", wait_until="domcontentloaded")
         await page.screenshot(path=output / "n8n-workflows.png", full_page=True)
     finally:
         await context.close()

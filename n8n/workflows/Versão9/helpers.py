@@ -1,6 +1,7 @@
 """Helpers para gerar nós n8n V9."""
 import json
 import os
+import re
 
 GLPI_URL_DEFAULT = os.getenv("GLPI_API_URL", "http://host.docker.internal:9080/apirest.php")
 FISCAL_WH_KEY = os.getenv("FISCAL_WEBHOOK_KEY", "fiscal-ic-2026")
@@ -39,10 +40,79 @@ APP_TOKEN_EXPR = required_n8n_env_expr("GLPI_APP_TOKEN")
 AUTH_BASIC_EXPR = required_n8n_env_expr("GLPI_AUTH_BASIC")
 
 
+_PROCESS_ENV_GUARD_RE = re.compile(
+    r"\(\s*typeof\s+process\s*!==?\s*(['\"])undefined\1\s*&&\s*"
+    r"process\.env(?P<access>\.[A-Za-z_$][A-Za-z0-9_$]*|\[[^\]\r\n]+\])\s*\)"
+)
+_PROCESS_ENV_DIRECT_RE = re.compile(
+    r"process\.env(?P<access>\.[A-Za-z_$][A-Za-z0-9_$]*|\[[^\]\r\n]+\])"
+)
+
+
+def _has_env_first_prefix(source: str, start: int, access: str) -> bool:
+    """Return whether a guarded process access already has the n8n $env branch."""
+    env_prefix = re.compile(
+        r"\(\s*typeof\s+\$env\s*!==?\s*(['\"])undefined\1\s*&&\s*"
+        + re.escape("$env" + access)
+        + r"\s*\)\s*\|\|\s*$"
+    )
+    return env_prefix.search(source[:start]) is not None
+
+
+def normalize_n8n_env_access(source: str) -> str:
+    """Make JavaScript environment reads compatible with the n8n Code runtime.
+
+    n8n exposes workflow variables through ``$env``. ``process`` may be absent
+    in the Code task runner, so every legacy ``process.env`` read is normalized
+    to consult ``$env`` first while retaining ``process.env`` as a fallback for
+    local Node-based tests. The transformation is deliberately idempotent.
+    """
+    guarded = list(_PROCESS_ENV_GUARD_RE.finditer(source))
+    guarded_spans = [(match.start(), match.end()) for match in guarded]
+    replacements: list[tuple[int, int, str]] = []
+
+    for match in guarded:
+        access = match.group("access")
+        if _has_env_first_prefix(source, match.start(), access):
+            continue
+        replacements.append(
+            (
+                match.start(),
+                match.end(),
+                "((typeof $env !== 'undefined' && $env"
+                + access
+                + ") || (typeof process !== 'undefined' && process.env"
+                + access
+                + "))",
+            )
+        )
+
+    for match in _PROCESS_ENV_DIRECT_RE.finditer(source):
+        if any(start <= match.start() < end for start, end in guarded_spans):
+            continue
+        access = match.group("access")
+        replacements.append(
+            (
+                match.start(),
+                match.end(),
+                "((typeof $env !== 'undefined' && $env"
+                + access
+                + ") || (typeof process !== 'undefined' && process.env"
+                + access
+                + "))",
+            )
+        )
+
+    normalized = source
+    for start, end, replacement in sorted(replacements, reverse=True):
+        normalized = normalized[:start] + replacement + normalized[end:]
+    return normalized
+
+
 def _required_process_env_expr(name):
     return (
-        "(() => { const value = String((typeof process !== 'undefined' && "
-        f"process.env.{name}) || '').trim(); "
+        "(() => { const value = String(((typeof $env !== 'undefined' && "
+        f"$env.{name}) || (typeof process !== 'undefined' && process.env.{name})) || '').trim(); "
         f"if (!value || value === 'CHANGE_ME') throw new Error('{name} ausente'); "
         "return value; })()"
     )
@@ -76,7 +146,20 @@ def sanitize_workflow_secrets(value):
                 + f"'undefined' && process.env.{name}) || '')"
             )
             value = value.replace(weak, replacement)
-    return value
+
+    # Code nodes that call the GLPI API directly do not benefit from the
+    # separate "Validar Sessão GLPI" node at the exact call site.  Require the
+    # session token locally as well, so a missing/invalid initSession result can
+    # never be sent as an empty header.
+    session_pattern = re.compile(
+        r"const sessionToken = String\((\$\('[^']+'\)\.first\(\)\.json\.session_token) \|\| ''\);"
+    )
+    value = session_pattern.sub(
+        r"const sessionToken = (() => { const value = String(\1 || '').trim(); "
+        r"if (!value) throw new Error('GLPI session_token ausente'); return value; })();",
+        value,
+    )
+    return normalize_n8n_env_access(value)
 
 def n8n_expr(js):
     return "={{ " + js + " }}"

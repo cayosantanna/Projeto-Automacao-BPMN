@@ -5,14 +5,17 @@
 Pergunta principal: o candidato híbrido local — TF-IDF, Granite Embedding 97M
 em PyTorch FP32 e regressão logística calibrada — reduz o trabalho humano na
 triagem de manutenção do patrimônio de um campus federal sem produzir risco de
-decisão inaceitável e com desempenho não inferior ao Gemini no mesmo conjunto
-de teste congelado?
+decisão inaceitável, e como seus riscos, cobertura, custo e latência se comparam
+ao Gemini no mesmo conjunto de teste congelado?
 
 - H1: o candidato local supera regra fixa, classe majoritária e TF-IDF isolado
   em F1 macro de classificação.
-- H2: o candidato local respeita simultaneamente os limites de falso negativo e
-  falso positivo de deduplicação e é não inferior ao `gemini-3.5-flash` no
-  risco crítico, sob comparação pareada.
+- H2, pendente de pré-registro: o candidato local respeita simultaneamente os
+  limites de falso negativo e falso positivo de deduplicação e não ultrapassa
+  as margens institucionais de risco crítico em relação ao
+  `gemini-3.5-flash`, sob comparação pareada. Cada risco exige estimando, margem
+  e regra de decisão próprios; enquanto esses itens não forem aprovados antes
+  do holdout, H2 não é testada como não inferioridade.
 - H3: a configuração aprovada da fila processa a carga sem perda, inversão ou
   duplicação de lease e com taxa de falha e p95 dentro dos limites
   pré-registrados.
@@ -82,8 +85,9 @@ Consequentemente, as métricas desta etapa são descritas como **concordância c
 gabarito sintético pré-especificado**. Elas não estimam erro do próprio gabarito
 nem demonstram validade da decisão para chamados reais. A evidência operacional
 é separada da evidência de eficácia, conforme a
-[`auditoria_amostral_v4.md`](../docs/auditoria_amostral_v4.md) e o relatório
-[`resultados_tecnicos_2026-07-14.md`](resultados/resultados_tecnicos_2026-07-14.md).
+[`PRE_REGISTRO_PENDENTE.md`](PRE_REGISTRO_PENDENTE.md). Os relatórios históricos
+locais ficam fora da distribuição pública e não constituem evidência
+confirmatória.
 
 ### Estados do candidato local
 
@@ -365,7 +369,21 @@ podem orientar ajustes posteriores.
 
 ### Fase B — calibração de fila e vazão
 
-A calibração ocorre em janela isolada e com fila operacional vazia.
+A calibração ocorre em janela isolada e com fila operacional vazia. Cada
+repetição é registrada no banco antes da recriação do n8n. Durante essa
+recriação, `FILA_IA_RUN_SCOPE` recebe o `run_id` da repetição: o WF06 passa a
+reservar e medir somente tickets vinculados a esse experimento em
+`dataset_controle`. O relógio global do escalonador é reiniciado antes da carga,
+para que uma liberação futura de uma repetição anterior não contamine o próximo
+tratamento.
+
+O início e o fim da janela usam o relógio do PostgreSQL. Ao término, uma
+auditoria procura ingresso, reserva ou decisão de IA pertencente a tickets
+externos ao `run_id`. Qualquer ocorrência reprova a repetição. Registros
+históricos fechados não são contados só por existirem: é necessário haver um
+evento na janela ou um estado ativo de fila alterado dentro dela. No bloco
+`finally`, o n8n é sempre recriado com o escopo vazio, restabelecendo a fila
+operacional.
 
 Primeiro é feito um rastreio de configurações:
 
@@ -424,7 +442,7 @@ revisado V4.1 planeja aproximadamente 2.078 chamados: 1.200 preservados do V3 e
 negativos completos e 73 dedup negativos críticos/insuficientes. As 960
 repetições superficiais do V3 ficam em análise secundária de robustez. A
 distribuição e os cálculos estão registrados em
-[`auditoria_amostral_v4.md`](../docs/auditoria_amostral_v4.md). Essa expansão é
+[`PRE_REGISTRO_PENDENTE.md`](PRE_REGISTRO_PENDENTE.md). Essa expansão é
 futura e nenhum novo caso é gerado na etapa corrente.
 
 Antes da expansão, as 200 linhas positivas do V3 permitem concordância no
@@ -494,6 +512,29 @@ São reportados:
   predição da classe `TRIAGEM_MANUAL`;
 - resultados por cenário, risco, dificuldade e completude do chamado.
 
+### Estratos de risco crítico na comparação local–Gemini
+
+O relatório pareado separa dois eventos operacionais que a acurácia global não
+representa adequadamente:
+
+- **falso negativo automático de deduplicação**: gabarito `DUPLICADO` e saída
+  `NAO_DUPLICADO` sem revisão humana;
+- **manutenção encaminhada automaticamente como OBRA**: gabarito `DEMO` ou
+  `SOB_DEMANDA` e saída `OBRA` sem revisão humana.
+
+Em cada estrato são preservados o número de oportunidades, pares observáveis,
+pares inválidos ou incompletos, eventos por provedor, tabela pareada
+`ambos/local apenas/Gemini apenas/nenhum` e diferença de risco local menos
+Gemini. Abstenções e rotas humanas não são contadas como esses eventos, mas sua
+carga é reportada separadamente. Falha, ausência, duplicação de registro ou
+divergência de tarefa, gabarito ou hash não é interpretada como decisão segura:
+o par fica fora do denominador observável e aparece como incompleto.
+
+Na etapa de desenvolvimento esses resultados são exclusivamente descritivos.
+Não se calcula p-valor, não inferioridade ou conclusão de adoção para os
+estratos críticos, porque ainda não há margem específica pré-registrada. Zero
+eventos observados também não implica risco populacional zero.
+
 ## Métricas de eficiência
 
 Por execução e por 100 tickets devem ser registrados:
@@ -558,12 +599,18 @@ taxa de falso positivo, risco, cobertura, custo e latência. Wilson 95% é usado
 como complemento para proporções. McNemar exato é secundário para diferença de
 acerto pareado e não substitui o intervalo do delta de F1.
 
+A acurácia global local menos Gemini é um estimando diferente dos riscos
+críticos. Portanto, eventual não inferioridade da acurácia global não testa H2.
+Até que as margens específicas sejam aprovadas, os dois estratos críticos usam
+somente estimativas pareadas descritivas; seus denominadores e discordâncias não
+são combinados em uma pontuação única.
+
 Quando houver vários comparadores, uma comparação primária é declarada antes do
 teste; as demais são secundárias e usam correção de multiplicidade ou são
 interpretadas como exploratórias. Ausência de significância não prova
 equivalência ou não inferioridade.
 
-## Critérios pré-registrados
+## Proposta de critérios a pré-registrar
 
 Antes da abertura do teste devem ser aprovados pelos responsáveis técnicos:
 
@@ -573,15 +620,23 @@ Antes da abertura do teste devem ser aprovados pelos responsáveis técnicos:
   possível duplicidade ≥ 90% no ponto congelado;
 - limite superior de 95% do risco seletivo de classificação ≤ 10%;
 - limite inferior de 95% da cobertura automática ≥ 60%;
-- limite inferior de 95% do recall de `OBRA` ≥ 90%;
+- zero erros automáticos observados `MANUTENÇÃO → OBRA`, acompanhado do limite
+  superior unilateral de 95% escolhido institucionalmente antes do holdout;
+- para casos realmente `OBRA`, relato separado do recall automático sobre todos
+  os casos e da acurácia seletiva apenas entre os casos cobertos; nenhum dos
+  dois pode ser chamado simplesmente de “recall de OBRA” sem denominador;
 - referência correta em duplicados dentro do limite aprovado;
 - nenhuma perda ou duplicação de lease observada, acompanhada do limite
   superior de confiança da taxa de falha;
 - p95 e custo dentro dos SLAs e orçamento registrados antes do teste.
 
-Esses valores são proposta inicial e não podem ser alterados depois de conhecer
-os resultados. Mudança posterior cria uma nova versão do protocolo e novo
-conjunto confirmatório.
+Esses valores são proposta inicial, ainda não aprovada. O arquivo
+[`PRE_REGISTRO_PENDENTE.md`](PRE_REGISTRO_PENDENTE.md) registra as decisões em
+aberto. Depois de aprovados e antes de abrir o holdout, eles não podem ser
+alterados; mudança posterior exige nova versão do protocolo e novo conjunto
+confirmatório. A regressão de desenvolvimento atual não satisfaz a proposta de
+cobertura automática mínima de 60%, portanto essa meta não pode ser descrita
+como alcançada.
 
 Na Fase L, esses limites são aplicados como gates pontuais de desenvolvimento e
 os intervalos são descritivos, pois o corpus sintético de calibração não é o
@@ -622,9 +677,10 @@ na configuração medida neste computador. O Granite 350M é extractor opcional 
 permanece desligado no caminho síncrono normal.
 
 O único papel remoto na sequência operacional vigente é `SECONDARY`, associado
-a `gemini-3.5-flash`. Os adaptadores de Gemini 2.5, Gemini 3.1 e DeepSeek são
-mantidos apenas para reproduzir ensaios históricos; a configuração ativa não os
-chama. Essa política operacional não autoriza misturar modelos numa estimativa
+a `gemini-3.5-flash`. Não existe executor pareado DeepSeek validado no estado
+atual; a configuração registra `deepseek-v4-flash` apenas como candidato remoto
+bloqueado, pois sua API é tarifada e seu contrato difere do Gemini. A configuração
+ativa não o chama. Essa política operacional não autoriza misturar modelos numa estimativa
 de eficácia. WF02/WF03 usam contrato canônico estruturado; o remoto recebe
 prompt e JSON Schema, enquanto o local recebe payload JSON nativo. Seed e
 perfil são registrados quando suportados, mas não tornam uma API remota
@@ -709,16 +765,24 @@ encadeamento operacional `LOCAL → SECONDARY` é avaliado à parte como políti
 de disponibilidade, não como um modelo composto na comparação confirmatória.
 
 Para preservar a quota Gemini, o número máximo de chamadas remotas é calculado
-e aprovado antes da abertura dos resultados. Se o orçamento não cobrir o
+e aprovado antes da abertura dos resultados. RPM, TPM e RPD são copiados dos
+limites ativos do projeto no AI Studio imediatamente antes do ensaio; o executor
+aplica por padrão 80% desses valores, reserva RPM/TPM em janela móvel e mantém um
+ledger conservador de tentativas em 24 horas. Como a cota é compartilhada por
+projeto, também se exige ausência de outro consumidor durante o ensaio. Se o orçamento não cobrir o
 holdout completo, usa-se uma subamostra estratificada, pareada entre modelos e
 congelada previamente por `case_id` e hash. Falha de quota durante a execução
-não autoriza completar os casos restantes com outro papel.
+interrompe no primeiro HTTP 429 e não autoriza retry nem completar os casos
+restantes com outro papel. O protocolo detalhado está em
+`avaliacao/PROTOCOLO_BENCHMARK_REMOTO_V1.md`.
 
-A adoção do candidato local só é recomendada se ele for não inferior nos riscos
-críticos e apresentar vantagem mensurável em F1, custo, latência, privacidade,
-operação local ou dependência externa. Se os erros forem dominados por ausência
-de sala, ativo ou sintoma, a conclusão prioritária é melhorar o formulário e o
-catálogo do GLPI, não treinar outro modelo sobre entradas insuficientes.
+A adoção do candidato local só poderá ser recomendada após aprovação das
+margens institucionais, avaliação confirmatória separada dos riscos críticos e
+vantagem mensurável em F1, custo, latência, privacidade, operação local ou
+dependência externa. A comparação descritiva atual não autoriza essa decisão.
+Se os erros forem dominados por ausência de sala, ativo ou sintoma, a conclusão
+prioritária é melhorar o formulário e o catálogo do GLPI, não treinar outro
+modelo sobre entradas insuficientes.
 
 ## Validade e limites de conclusão
 

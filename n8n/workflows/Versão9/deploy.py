@@ -1,9 +1,9 @@
 """Reconstrói, valida e implanta os workflows V9 no n8n.
 
-Com ``N8N_API_KEY`` configurada, usa a API REST pública. Sem a chave, usa o
-CLI do container n8n. Falhas de autenticação, credenciais ou atualização
-interrompem o deploy para evitar uma implantação parcial apresentada como
-sucesso.
+Com ``N8N_API_KEY`` configurada, usa a API REST pública. Sem a chave, prefere
+a sessão REST autenticada da própria interface; o CLI do container permanece
+como último recurso. Falhas interrompem o deploy para evitar uma implantação
+parcial apresentada como sucesso.
 """
 import argparse
 import json
@@ -344,6 +344,19 @@ def deploy_via_docker_cli():
         run(["docker", "compose", "up", "-d", "n8n"], cwd=compose_dir)
     print("[OK] Deploy via Docker CLI concluido.")
 
+
+def rest_session_configured() -> bool:
+    values = (
+        os.getenv("N8N_BASIC_AUTH_USER", "").strip(),
+        os.getenv("N8N_BASIC_AUTH_PASSWORD", "").strip(),
+    )
+    return all(value and value.upper() != "CHANGE_ME" for value in values)
+
+
+def deploy_via_rest_session() -> None:
+    print("[INFO] N8N_API_KEY ausente; usando sessão REST autenticada do n8n.")
+    run([sys.executable, str(DIR / "deploy_rest_session.py")])
+
 def main():
     global N8N_URL
 
@@ -354,7 +367,10 @@ def main():
     validate_workflows()
     api_key = load_api_key()
     if not api_key:
-        deploy_via_docker_cli()
+        if rest_session_configured():
+            deploy_via_rest_session()
+        else:
+            deploy_via_docker_cli()
         return
     s = get_session(api_key)
     # Credentials

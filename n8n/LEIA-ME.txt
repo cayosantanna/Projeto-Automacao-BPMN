@@ -7,5 +7,10 @@ PASTA N8N
 - .gitignore: exclusões locais do módulo n8n.
 
 Subpastas:
-- credentials: credenciais importáveis para o ambiente de teste.
-- workflows: fontes e exports dos workflows.
+- credentials: exemplo SMTP local e inventário de credenciais; a credencial
+  PostgreSQL deve ser criada com segredo próprio.
+- workflows: exports nativos importáveis pela UI, builders reproduzíveis e
+  tutorial visual em `workflows/Versão9/README.md`.
+- history: pacote público, inativo e sanitizado das versões V1–V8, com
+  manifesto de proveniência e validador. Ele preserva a evolução, mas não é
+  utilizado pela V9 ativa.

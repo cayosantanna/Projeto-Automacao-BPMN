@@ -72,7 +72,7 @@ LOCATIONS = (
 REQUESTERS = tuple(f"usuario.piloto{index:02d}" for index in range(1, 25))
 
 POLICY_RULES = {
-    "source": "docs/DocumentaçãoInicialProjeto.txt:39-44",
+    "source": "avaliacao/metodologia_avaliacao.md",
     "OBRA": (
         "Criação ou ampliação de área, alteração estrutural, infraestrutura de grande "
         "porte implantada do zero ou reforma integral com mudança de projeto/layout."

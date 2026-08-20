@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -10,18 +11,11 @@ import socket
 import statistics
 import sys
 import time
+import uuid
 import urllib.error
 import urllib.request
-
-# FORCE IPv4 to avoid Gemini API timeouts on broken IPv6 networks
-import socket
-_old_getaddrinfo = socket.getaddrinfo
-def _ipv4_getaddrinfo(*args, **kwargs):
-    responses = _old_getaddrinfo(*args, **kwargs)
-    return [r for r in responses if r[0] == socket.AF_INET]
-socket.getaddrinfo = _ipv4_getaddrinfo
-from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from collections import Counter, defaultdict, deque
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -31,7 +25,7 @@ DEFAULT_DATASET = ROOT / "avaliacao" / "datasets" / "corpus_v3_teste.jsonl"
 DEFAULT_DATASET_MANIFEST = (
     ROOT / "avaliacao" / "datasets" / "corpus_v3_teste_manifest.json"
 )
-DEFAULT_OUTPUT = ROOT / "avaliacao" / "resultados" / "pareado-local-gemini-v1"
+DEFAULT_OUTPUT = ROOT / "avaliacao" / "resultados" / "pareado-local-gemini-v1.2"
 DEFAULT_DEV_DATASET = (
     ROOT / "avaliacao" / "datasets" / "desenvolvimento_local_v1.jsonl"
 )
@@ -44,6 +38,9 @@ DEFAULT_LOCAL_ONLY_OUTPUT = (
 DEFAULT_RESERVED_ONCE_LEDGER = (
     ROOT / "avaliacao" / "resultados" / ".local_reserved_one_shot.json"
 )
+DEFAULT_REMOTE_ATTEMPT_LEDGER = (
+    ROOT / "avaliacao" / "resultados" / ".gemini_remote_attempts.json"
+)
 DEFAULT_LOCAL_MODEL_MANIFEST = ROOT / "local_ai" / "artifacts" / "local_hybrid_manifest.json"
 PLAN_FILENAME = "paired_plan.json"
 UNITS_FILENAME = "paired_units.jsonl"
@@ -53,9 +50,9 @@ LOCAL_PLAN_FILENAME = "local_only_plan.json"
 LOCAL_UNITS_FILENAME = "local_only_units.jsonl"
 LOCAL_RESULTS_FILENAME = "local_only_predictions.jsonl"
 LOCAL_SUMMARY_FILENAME = "local_only_summary.json"
-DERIVED_PAIRED_SUMMARY_FILENAME = "paired_summary_metrics_v1.1.json"
-DERIVED_LOCAL_SUMMARY_FILENAME = "local_only_summary_metrics_v1.1.json"
-PLAN_VERSION = "paired-local-gemini-v1.0.0"
+DERIVED_PAIRED_SUMMARY_FILENAME = "paired_summary_metrics_v1.2.json"
+DERIVED_LOCAL_SUMMARY_FILENAME = "local_only_summary_metrics_v1.2.json"
+PLAN_VERSION = "paired-local-gemini-v1.2.0"
 LOCAL_PLAN_VERSION = "local-only-pipeline-v1.0.0"
 PROMPT_VERSION = "campus-maintenance-paired-v1.0.0"
 DEFAULT_SEED = 20260715
@@ -71,29 +68,310 @@ OFFICIAL_SOURCES = {
     "structured_output": (
         "https://ai.google.dev/gemini-api/docs/generate-content/structured-output"
     ),
-    "verified_on": "2026-07-15",
+    "verified_on": "2026-08-17",
     "rate_limit_note": (
-        "Limites ativos variam por projeto/tier e devem ser verificados no AI Studio; "
-        "nenhuma cota de conta é presumida pelo executor."
+        "Limites ativos variam por projeto/tier, são compartilhados por projeto (não "
+        "por chave) e devem ser verificados no AI Studio imediatamente antes da "
+        "execução; nenhuma cota de conta é presumida pelo executor."
+    ),
+    "rpd_reset_note": "RPD reinicia à meia-noite do horário do Pacífico.",
+    "pricing_note": (
+        "gemini-3.5-flash Standard consta como gratuito no Free Tier; o executor não "
+        "consegue inferir se o projeto associado à chave está sem faturamento."
     ),
 }
 CLASS_LABELS = ("OBRA", "DEMO", "SOB_DEMANDA", "TRIAGEM_MANUAL")
 DEDUP_LABELS = ("DUPLICADO", "NAO_DUPLICADO", "TRIAGEM_MANUAL")
 ABSTENTION_LABEL = "ABSTENCAO"
-SUMMARY_SCHEMA_VERSION = "1.1.0"
+SUMMARY_SCHEMA_VERSION = "1.2.0"
 DEDUP_POSITIVE_THRESHOLD = 0.95
 DEDUP_NEGATIVE_THRESHOLD = 0.07
 SECRET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,80}$")
+REMOTE_LEDGER_SCHEMA_VERSION = "gemini-attempt-ledger-v1.0.0"
+DEFAULT_QUOTA_UTILIZATION = 0.80
+MINUTE_WINDOW_SECONDS = 60.0
 
 
 class BenchmarkGuardError(RuntimeError):
     """Falha fechada antes de uma chamada remota ou mutação ambígua."""
 
 
+class BenchmarkExecutionAborted(BenchmarkGuardError):
+    """Execução interrompida que preserva somente registros já observados."""
+
+    def __init__(
+        self,
+        message: str,
+        records: Sequence[dict[str, Any]],
+        *,
+        phase: str,
+    ) -> None:
+        super().__init__(message)
+        self.records = [dict(row) for row in records]
+        self.phase = phase
+
+
+class SlidingMinuteQuotaLimiter:
+    """Reserva RPM e TPM em janela móvel antes de cada chamada remota.
+
+    A reserva usa o limite conservador já congelado na unidade (bytes UTF-8 tratados
+    como tokens, overhead e saída máxima). Isso deliberadamente subutiliza a cota para
+    reduzir o risco de HTTP 429. O limitador é local ao processo; a confirmação de que
+    não há outro consumidor do mesmo projeto continua sendo um gate operacional.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_rpm: int,
+        max_tpm: int,
+        clock: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
+        if max_rpm <= 0 or max_tpm <= 0:
+            raise BenchmarkGuardError("Limites efetivos de RPM/TPM devem ser positivos")
+        self.max_rpm = int(max_rpm)
+        self.max_tpm = int(max_tpm)
+        self.clock = clock
+        self.sleeper = sleeper
+        self.events: deque[tuple[float, int]] = deque()
+
+    def _prune(self, now: float) -> None:
+        cutoff = now - MINUTE_WINDOW_SECONDS
+        while self.events and self.events[0][0] <= cutoff:
+            self.events.popleft()
+
+    def _required_wait(self, now: float, token_reservation: int) -> float:
+        waits: list[float] = []
+        if len(self.events) >= self.max_rpm:
+            waits.append(self.events[0][0] + MINUTE_WINDOW_SECONDS - now)
+        current_tokens = sum(tokens for _, tokens in self.events)
+        if current_tokens + token_reservation > self.max_tpm:
+            removed = 0
+            for started_at, tokens in self.events:
+                removed += tokens
+                if current_tokens - removed + token_reservation <= self.max_tpm:
+                    waits.append(started_at + MINUTE_WINDOW_SECONDS - now)
+                    break
+        return max((value for value in waits if value > 0), default=0.0)
+
+    def acquire(self, token_reservation: int) -> float:
+        reservation = int(token_reservation)
+        if reservation <= 0:
+            raise BenchmarkGuardError("Reserva de tokens por chamada deve ser positiva")
+        if reservation > self.max_tpm:
+            raise BenchmarkGuardError(
+                "Uma única chamada excede o TPM efetivo: "
+                f"reserva={reservation}, limite={self.max_tpm}"
+            )
+        waited = 0.0
+        while True:
+            now = self.clock()
+            self._prune(now)
+            delay = self._required_wait(now, reservation)
+            if delay <= 0:
+                self.events.append((now, reservation))
+                return waited
+            # Margem mínima evita acordar no mesmo instante por arredondamento do relógio.
+            pause = min(MINUTE_WINDOW_SECONDS, delay + 0.001)
+            self.sleeper(pause)
+            waited += pause
+
+
+@contextlib.contextmanager
+def _locked_ledger(ledger_path: Path):
+    """Cross-process lock used while reading or replacing the remote ledger."""
+    lock_path = ledger_path.with_name(ledger_path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _read_remote_ledger(ledger_path: Path) -> dict[str, Any]:
+    if not ledger_path.exists():
+        return {
+            "schema_version": REMOTE_LEDGER_SCHEMA_VERSION,
+            "window_policy": "ROLLING_24_HOURS_UTC",
+            "attempts": [],
+        }
+    try:
+        payload = json.loads(ledger_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BenchmarkGuardError(
+            f"Ledger remoto inválido; execução bloqueada: {ledger_path}"
+        ) from exc
+    if (
+        payload.get("schema_version") != REMOTE_LEDGER_SCHEMA_VERSION
+        or not isinstance(payload.get("attempts"), list)
+    ):
+        raise BenchmarkGuardError(
+            f"Contrato do ledger remoto inválido; execução bloqueada: {ledger_path}"
+        )
+    return payload
+
+
+def _atomic_write_remote_ledger(ledger_path: Path, payload: dict[str, Any]) -> None:
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = ledger_path.with_name(
+        f".{ledger_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, ledger_path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _parse_ledger_time(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _rolling_attempts(payload: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
+    cutoff = now - timedelta(hours=24)
+    active: list[dict[str, Any]] = []
+    for item in payload["attempts"]:
+        if not isinstance(item, dict):
+            raise BenchmarkGuardError("Ledger remoto contém tentativa inválida")
+        started = _parse_ledger_time(item.get("started_at_utc"))
+        if started is None:
+            raise BenchmarkGuardError("Ledger remoto contém timestamp inválido")
+        if cutoff <= started:
+            active.append(item)
+    return active
+
+
+def assert_remote_ledger_capacity(
+    ledger_path: Path,
+    *,
+    max_remote_rpd: int,
+    planned_attempts: int,
+    now: datetime | None = None,
+) -> dict[str, int]:
+    if max_remote_rpd <= 0 or planned_attempts <= 0:
+        raise BenchmarkGuardError("Limite RPD e tentativas planejadas devem ser positivos")
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    with _locked_ledger(ledger_path):
+        payload = _read_remote_ledger(ledger_path)
+        used = len(_rolling_attempts(payload, current))
+    if used + planned_attempts > max_remote_rpd:
+        raise BenchmarkGuardError(
+            "Ledger remoto sem capacidade para o plano completo: "
+            f"usadas={used}, planejadas={planned_attempts}, limite_24h={max_remote_rpd}"
+        )
+    return {
+        "used_last_24h": used,
+        "planned_attempts": planned_attempts,
+        "max_remote_rpd": max_remote_rpd,
+    }
+
+
+def reserve_remote_attempt(
+    ledger_path: Path,
+    *,
+    max_remote_rpd: int,
+    model: str,
+    unit_id: str,
+    plan_sha256: str,
+    now: datetime | None = None,
+) -> str:
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    with _locked_ledger(ledger_path):
+        payload = _read_remote_ledger(ledger_path)
+        used = len(_rolling_attempts(payload, current))
+        if used >= max_remote_rpd:
+            raise BenchmarkGuardError(
+                f"Limite conservador do ledger remoto atingido: {used}/{max_remote_rpd} em 24h"
+            )
+        attempt_id = uuid.uuid4().hex
+        payload["attempts"].append(
+            {
+                "attempt_id": attempt_id,
+                "provider": REMOTE_PROVIDER,
+                "model": model,
+                "unit_id": unit_id,
+                "plan_manifest_payload_sha256": plan_sha256,
+                "started_at_utc": current.isoformat(),
+                "status": "STARTED_CONSERVATIVE_COUNT",
+                "http_status": None,
+                "error_code": None,
+            }
+        )
+        payload["updated_at_utc"] = current.isoformat()
+        _atomic_write_remote_ledger(ledger_path, payload)
+    return attempt_id
+
+
+def complete_remote_attempt(
+    ledger_path: Path,
+    attempt_id: str,
+    *,
+    http_status: int,
+    error_code: str | None,
+    now: datetime | None = None,
+) -> None:
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    with _locked_ledger(ledger_path):
+        payload = _read_remote_ledger(ledger_path)
+        target = next(
+            (
+                item
+                for item in payload["attempts"]
+                if isinstance(item, dict) and item.get("attempt_id") == attempt_id
+            ),
+            None,
+        )
+        if target is None:
+            raise BenchmarkGuardError(
+                f"Tentativa remota ausente no ledger: {attempt_id}"
+            )
+        target.update(
+            {
+                "status": "COMPLETED",
+                "http_status": int(http_status),
+                "error_code": error_code,
+                "completed_at_utc": current.isoformat(),
+            }
+        )
+        payload["updated_at_utc"] = current.isoformat()
+        _atomic_write_remote_ledger(ledger_path, payload)
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        for chunk in iter(lambda: handle.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -134,8 +412,22 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> str:
+    digest = hashlib.sha256()
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            line = canonical_json(row) + "\n"
+            digest.update(line.encode("utf-8"))
+            handle.write(line)
+    return digest.hexdigest()
+
+
 def validate_reserved_dataset(
-    dataset: Path, manifest_path: Path, rows: Sequence[dict[str, Any]]
+    dataset: Path,
+    manifest_path: Path,
+    rows: Sequence[dict[str, Any]],
+    *,
+    require_confirmatory_eligible: bool = True,
 ) -> dict[str, Any]:
     if not manifest_path.is_file():
         raise BenchmarkGuardError(f"Manifesto do corpus reservado ausente: {manifest_path}")
@@ -144,6 +436,22 @@ def validate_reserved_dataset(
         raise BenchmarkGuardError("O benchmark pareado exige corpus reservado split=TESTE")
     if {str(row.get("split")) for row in rows} != {"TESTE"}:
         raise BenchmarkGuardError("Corpus contém registros fora do split TESTE")
+    if require_confirmatory_eligible:
+        if (
+            manifest.get("confirmatory_eligible") is not True
+            or manifest.get("pilot_only") is not False
+            or manifest.get("labels_exposed") is not False
+        ):
+            raise BenchmarkGuardError(
+                "Corpus TESTE não está elegível como holdout confirmatório"
+            )
+        human_gate = str(
+            ((manifest.get("validation") or {}).get("human_label_gate") or "")
+        ).upper()
+        if human_gate not in {"CONCLUIDO", "ADJUDICADO"}:
+            raise BenchmarkGuardError(
+                "Corpus TESTE não concluiu o gate de rótulos humanos/adjudicados"
+            )
     expected_hash = (((manifest.get("files") or {}).get("jsonl") or {}).get("sha256"))
     observed_hash = sha256_file(dataset)
     if not expected_hash or str(expected_hash).lower() != observed_hash.lower():
@@ -160,6 +468,9 @@ def validate_reserved_dataset(
         "manifest_status": manifest.get("status"),
         "human_label_gate": (manifest.get("validation") or {}).get("human_label_gate"),
         "scientific_result": bool(manifest.get("scientific_result")),
+        "confirmatory_eligible": bool(manifest.get("confirmatory_eligible")),
+        "pilot_only": bool(manifest.get("pilot_only")),
+        "labels_exposed": bool(manifest.get("labels_exposed")),
         "rows": len(rows),
         "roles": dict(sorted(roles.items())),
     }
@@ -568,11 +879,13 @@ def build_local_only_units(
 
 
 def budget_requirements(units: Sequence[dict[str, Any]]) -> dict[str, int]:
+    reservations = [
+        int(unit["budget"]["remote_token_reservation"]) for unit in units
+    ]
     return {
         "remote_calls": len(units),
-        "remote_tokens_conservative": sum(
-            int(unit["budget"]["remote_token_reservation"]) for unit in units
-        ),
+        "remote_tokens_conservative": sum(reservations),
+        "max_remote_tokens_per_call_conservative": max(reservations, default=0),
     }
 
 
@@ -582,9 +895,24 @@ def preflight_budget(
     max_remote_calls: int,
     max_remote_tokens: int,
     max_rpm: int,
+    max_remote_rpd: int,
+    max_tpm: int,
+    quota_utilization: float = 1.0,
 ) -> dict[str, Any]:
-    if max_remote_calls <= 0 or max_remote_tokens <= 0 or max_rpm <= 0:
+    declared_tpm = max_tpm
+    if (
+        max_remote_calls <= 0
+        or max_remote_tokens <= 0
+        or max_rpm <= 0
+        or max_remote_rpd <= 0
+        or declared_tpm <= 0
+    ):
         raise BenchmarkGuardError("Todos os limites remotos devem ser inteiros positivos")
+    if not 0 < quota_utilization <= 1:
+        raise BenchmarkGuardError("quota_utilization deve estar no intervalo (0, 1]")
+    effective_rpm = max(1, math.floor(max_rpm * quota_utilization))
+    effective_tpm = max(1, math.floor(declared_tpm * quota_utilization))
+    effective_rpd = max(1, math.floor(max_remote_rpd * quota_utilization))
     errors: list[str] = []
     if requirements["remote_calls"] > max_remote_calls:
         errors.append(
@@ -595,6 +923,17 @@ def preflight_budget(
             "tokens conservadores necessários="
             f"{requirements['remote_tokens_conservative']} > máximo={max_remote_tokens}"
         )
+    if requirements["remote_calls"] > effective_rpd:
+        errors.append(
+            "chamadas necessárias="
+            f"{requirements['remote_calls']} > limite RPD efetivo={effective_rpd}"
+        )
+    if requirements.get("max_remote_tokens_per_call_conservative", 0) > effective_tpm:
+        errors.append(
+            "reserva máxima por chamada="
+            f"{requirements['max_remote_tokens_per_call_conservative']} > "
+            f"limite TPM efetivo={effective_tpm}"
+        )
     if errors:
         raise BenchmarkGuardError("Orçamento remoto insuficiente; " + "; ".join(errors))
     return {
@@ -602,10 +941,22 @@ def preflight_budget(
         "max_remote_calls": max_remote_calls,
         "max_remote_tokens": max_remote_tokens,
         "max_rpm": max_rpm,
+        "max_tpm": declared_tpm,
+        "max_remote_rpd": max_remote_rpd,
+        "quota_utilization": quota_utilization,
+        "effective_limits": {
+            "rpm": effective_rpm,
+            "tpm": effective_tpm,
+            "rpd_conservative_rolling_24h": effective_rpd,
+        },
         "required": requirements,
         "token_estimation": (
             "Reserva conservadora: bytes UTF-8 do prompt + 4096 tokens de overhead "
             "de request/schema + maxOutputTokens; não usa endpoint remoto de contagem."
+        ),
+        "quota_scope": (
+            "Os limites Gemini são compartilhados por projeto. Este processo não detecta "
+            "outros consumidores; a execução exige confirmação operacional separada."
         ),
     }
 
@@ -626,6 +977,7 @@ def build_plan(
     gemini_model: str,
     max_output_tokens_per_call: int,
     budget: dict[str, Any],
+    noninferiority_margin: float | None,
 ) -> tuple[dict[str, Any], bytes]:
     units_bytes = "".join(canonical_json(unit) + "\n" for unit in units).encode("utf-8")
     task_counts = Counter(unit["task"] for unit in units)
@@ -640,6 +992,11 @@ def build_plan(
         "status": "FROZEN_DRY_RUN_PLAN",
         "dry_run_default": True,
         "paired_design": {
+            "analysis_intent": (
+                "DESCRIPTIVE_DEVELOPMENT_PILOT"
+                if dataset_audit.get("split") == "DESENVOLVIMENTO"
+                else "PRELIMINARY_RESERVED_COMPARISON"
+            ),
             "providers": [LOCAL_PROVIDER, REMOTE_PROVIDER],
             "same_units_same_order": True,
             "shared_input_hash_required": True,
@@ -695,7 +1052,52 @@ def build_plan(
             "fallback_enabled": False,
             "retry_enabled": False,
             "budget": budget,
+            "required_execution_confirmations": [
+                "remote_execution",
+                "active_quota_checked_in_ai_studio",
+                "billing_status_checked",
+                "exclusive_project_quota_window",
+            ],
             "official_sources": OFFICIAL_SOURCES,
+        },
+        "noninferiority": {
+            "pre_registered": noninferiority_margin is not None,
+            "margin_local_minus_gemini": noninferiority_margin,
+            "confidence": 0.95,
+            "method": "paired_hoeffding_distribution_free_bounds",
+            "estimand": "overall_accuracy_local_minus_accuracy_gemini",
+            "estimand_scope": "pooled_classification_and_deduplication_units",
+            "abstention_counted_as_incorrect": True,
+            "critical_risk_h2_evaluated": False,
+            "critical_risk_note": (
+                "Este estimando global não testa o risco crítico H2; riscos de "
+                "FN de não duplicidade e manutenção encaminhada como OBRA exigem "
+                "estimandos estratificados próprios."
+            ),
+            "requires_every_planned_pair_present_and_valid": True,
+            "eligible_in_development_pilot": False,
+            "decision_rule": (
+                "one_sided_95_lower_bound > -margin"
+                if noninferiority_margin is not None
+                else "NOT_EVALUATED_WITHOUT_EXPLICIT_MARGIN"
+            ),
+        },
+        "critical_risk_comparison": {
+            "analysis_type": "PAIRED_DESCRIPTIVE_ONLY",
+            "strata": [
+                "automatic_dedup_false_negative",
+                "automatic_maintenance_as_obra",
+            ],
+            "risk_difference_direction": "local_minus_gemini",
+            "higher_rate_is_worse": True,
+            "noninferiority_evaluated": False,
+            "noninferiority_margin": None,
+            "confirmatory_claim_allowed": False,
+            "reason": (
+                "Margens e regras de decisão específicas por risco ainda não "
+                "foram pré-registradas; o piloto reporta somente estimativas "
+                "pareadas descritivas."
+            ),
         },
         "local_candidate": local_candidate,
         "scientific_status": {
@@ -957,6 +1359,7 @@ def redact(value: Any, secrets: Sequence[str]) -> str:
     for secret in sorted((item for item in secrets if item), key=len, reverse=True):
         text = text.replace(secret, "[REDACTED]")
     text = re.sub(r"AIza[0-9A-Za-z_-]{20,}", "[REDACTED_GOOGLE_KEY]", text)
+    text = re.sub(r"\bsk-[0-9A-Za-z_-]{20,}\b", "[REDACTED_API_KEY]", text)
     return text[:500]
 
 
@@ -1314,6 +1717,11 @@ def run_execution(
     max_remote_calls: int,
     max_remote_tokens: int,
     max_rpm: int,
+    max_remote_rpd: int,
+    max_tpm: int,
+    quota_utilization: float = 1.0,
+    remote_attempt_ledger: Path,
+    plan_sha256: str,
     max_output_tokens_per_call: int,
     seed: int,
     timeout_seconds: float,
@@ -1321,13 +1729,17 @@ def run_execution(
         [str, dict[str, str], dict[str, Any], float], tuple[int, dict[str, Any]]
     ] = http_post_json,
     sleeper: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> list[dict[str, Any]]:
     requirements = budget_requirements(units)
-    preflight_budget(
+    budget = preflight_budget(
         requirements,
         max_remote_calls=max_remote_calls,
         max_remote_tokens=max_remote_tokens,
         max_rpm=max_rpm,
+        max_remote_rpd=max_remote_rpd,
+        max_tpm=max_tpm,
+        quota_utilization=quota_utilization,
     )
     if gemini_model not in ALLOWED_GEMINI_MODELS:
         raise BenchmarkGuardError("Modelo Gemini não está fixado como estável no protocolo")
@@ -1362,24 +1774,56 @@ def run_execution(
             )
         )
 
+    invalid_local = [row for row in records if not row.get("ok")]
+    if invalid_local:
+        counts = Counter(str(row.get("error_code") or "UNKNOWN") for row in invalid_local)
+        raise BenchmarkExecutionAborted(
+            "Pré-flight LOCAL falhou; nenhuma chamada Gemini foi realizada. "
+            f"inválidas={len(invalid_local)}/{len(units)}; erros={dict(counts)}",
+            records,
+            phase="LOCAL_PREFLIGHT",
+        )
+    try:
+        assert_remote_ledger_capacity(
+            remote_attempt_ledger,
+            max_remote_rpd=budget["effective_limits"]["rpd_conservative_rolling_24h"],
+            planned_attempts=len(units),
+        )
+    except BenchmarkGuardError as exc:
+        raise BenchmarkExecutionAborted(
+            str(exc), records, phase="REMOTE_LEDGER_PREFLIGHT"
+        ) from exc
+
     remote_url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{gemini_model}:generateContent"
     )
-    interval = 60.0 / max_rpm
-    last_started: float | None = None
+    limiter = SlidingMinuteQuotaLimiter(
+        max_rpm=budget["effective_limits"]["rpm"],
+        max_tpm=budget["effective_limits"]["tpm"],
+        clock=monotonic,
+        sleeper=sleeper,
+    )
     remote_calls = 0
     observed_tokens = 0
     for unit in units:
-        now = time.monotonic()
-        if last_started is not None:
-            remaining = interval - (now - last_started)
-            if remaining > 0:
-                sleeper(min(60.0, remaining))
-        last_started = time.monotonic()
+        reservation = int(unit["budget"]["remote_token_reservation"])
+        quota_wait_seconds = limiter.acquire(reservation)
         remote_calls += 1
         if remote_calls > max_remote_calls:
             raise BenchmarkGuardError("Contador remoto excederia max_remote_calls")
+        try:
+            attempt_id = reserve_remote_attempt(
+                remote_attempt_ledger,
+                max_remote_rpd=budget["effective_limits"]["rpd_conservative_rolling_24h"],
+                model=gemini_model,
+                unit_id=str(unit["unit_id"]),
+                plan_sha256=plan_sha256,
+            )
+        except BenchmarkGuardError as exc:
+            raise BenchmarkExecutionAborted(
+                str(exc), records, phase="REMOTE_LEDGER_RESERVATION"
+            ) from exc
         started = time.perf_counter()
         status, body = post_json(
             remote_url,
@@ -1393,21 +1837,75 @@ def run_execution(
         usage = gemini_usage(body)
         if isinstance(usage.get("total_tokens"), int):
             observed_tokens += int(usage["total_tokens"])
-        records.append(
-            _prediction_record(
-                unit=unit,
-                provider=REMOTE_PROVIDER,
-                model=gemini_model,
-                status=status,
-                latency_ms=(time.perf_counter() - started) * 1000,
-                normalized=normalize_gemini(unit, status, body),
-                usage=usage,
-                raw_body=body,
-                secrets=secrets,
-            )
+        normalized = normalize_gemini(unit, status, body)
+        record = _prediction_record(
+            unit=unit,
+            provider=REMOTE_PROVIDER,
+            model=gemini_model,
+            status=status,
+            latency_ms=(time.perf_counter() - started) * 1000,
+            normalized=normalized,
+            usage=usage,
+            raw_body=body,
+            secrets=secrets,
         )
+        record["remote_quota_control"] = {
+            "reserved_tokens_conservative": reservation,
+            "waited_before_call_ms": round(quota_wait_seconds * 1000, 3),
+            "effective_rpm": budget["effective_limits"]["rpm"],
+            "effective_tpm": budget["effective_limits"]["tpm"],
+            "quota_utilization": budget["quota_utilization"],
+        }
+        complete_remote_attempt(
+            remote_attempt_ledger,
+            attempt_id,
+            http_status=status,
+            error_code=record.get("error_code"),
+        )
+        records.append(record)
+        if status <= 0 or record.get("error_code") == "TRANSPORT_ERROR":
+            raise BenchmarkExecutionAborted(
+                "Falha de transporte até o Gemini; execução remota interrompida "
+                "na primeira tentativa para não consumir o intervalo e o ledger "
+                "com chamadas que não alcançaram o provedor.",
+                records,
+                phase="REMOTE_TRANSPORT_ERROR",
+            )
+        if status == 429:
+            raise BenchmarkExecutionAborted(
+                "Gemini retornou HTTP 429; execução remota interrompida no primeiro "
+                "rate limit e a tentativa permaneceu contabilizada no ledger.",
+                records,
+                phase="REMOTE_HTTP_429",
+            )
+        if not 200 <= status < 300:
+            raise BenchmarkExecutionAborted(
+                "Gemini retornou HTTP não bem-sucedido; execução remota interrompida "
+                "sem retry para preservar orçamento e comparabilidade.",
+                records,
+                phase="REMOTE_HTTP_ERROR",
+            )
+        if not record.get("ok"):
+            raise BenchmarkExecutionAborted(
+                "Resposta Gemini violou o contrato congelado; execução interrompida "
+                "na primeira violação sem retry.",
+                records,
+                phase="REMOTE_CONTRACT_ERROR",
+            )
+        total_tokens = usage.get("total_tokens")
+        if isinstance(total_tokens, int) and total_tokens > reservation:
+            raise BenchmarkExecutionAborted(
+                "Uso observado excedeu a reserva conservadora da unidade; o controle "
+                "TPM não pode mais ser garantido.",
+                records,
+                phase="REMOTE_UNIT_TOKEN_RESERVATION",
+            )
         if observed_tokens > max_remote_tokens:
-            raise BenchmarkGuardError("Uso remoto observado excedeu max_remote_tokens")
+            raise BenchmarkExecutionAborted(
+                "Uso remoto observado excedeu max_remote_tokens",
+                records,
+                phase="REMOTE_TOKEN_BUDGET",
+            )
     return records
 
 
@@ -1425,8 +1923,10 @@ def run_local_only_execution(
     """Executa somente loopback; não conhece URL, chave ou orçamento Gemini."""
     if not local_base_url.startswith(("http://127.0.0.1", "http://localhost")):
         raise BenchmarkGuardError("Endpoint LOCAL deve permanecer em loopback")
+    if not local_token:
+        raise BenchmarkGuardError("Credencial da API LOCAL ausente no ambiente")
     records: list[dict[str, Any]] = []
-    headers = {"Authorization": f"Bearer {local_token}"} if local_token else {}
+    headers = {"Authorization": f"Bearer {local_token}"}
     for unit in units:
         path, payload = _local_payload(unit)
         started = time.perf_counter()
@@ -1436,24 +1936,30 @@ def run_local_only_execution(
             payload,
             timeout_seconds,
         )
-        records.append(
-            _prediction_record(
-                unit=unit,
-                provider=LOCAL_PROVIDER,
-                model=local_model,
-                status=status,
-                latency_ms=(time.perf_counter() - started) * 1000,
-                normalized=normalize_local(
-                    unit,
-                    status,
-                    body,
-                    require_pipeline_eligible=False,
-                ),
-                usage=None,
-                raw_body=body,
-                secrets=[local_token],
-            )
+        record = _prediction_record(
+            unit=unit,
+            provider=LOCAL_PROVIDER,
+            model=local_model,
+            status=status,
+            latency_ms=(time.perf_counter() - started) * 1000,
+            normalized=normalize_local(
+                unit,
+                status,
+                body,
+                require_pipeline_eligible=False,
+            ),
+            usage=None,
+            raw_body=body,
+            secrets=[local_token],
         )
+        records.append(record)
+        if not record.get("ok"):
+            raise BenchmarkExecutionAborted(
+                "Execução LOCAL-only interrompida na primeira resposta inválida; "
+                "nenhuma falha pode ser omitida da comparação.",
+                records,
+                phase="LOCAL_ONLY_CONTRACT_ERROR",
+            )
     return records
 
 
@@ -1653,39 +2159,548 @@ def exact_mcnemar_p(local_only: int, gemini_only: int) -> float:
     return min(1.0, 2.0 * tail)
 
 
+def paired_noninferiority(
+    differences: Sequence[int],
+    specification: dict[str, Any] | None,
+    *,
+    seed: int,
+    validity_gate_passed: bool = True,
+    validity_failure_reason: str | None = None,
+    descriptive_pilot: bool = False,
+) -> dict[str, Any]:
+    spec = specification if isinstance(specification, dict) else {}
+    margin = spec.get("margin_local_minus_gemini")
+    base = {
+        "estimand": "overall_accuracy_local_minus_accuracy_gemini",
+        "estimand_scope": "pooled_classification_and_deduplication_units",
+        "abstention_counted_as_incorrect": True,
+        "critical_risk_h2_evaluated": False,
+        "critical_risk_note": (
+            "O estimando global não mede os riscos críticos H2; FN de "
+            "não duplicidade e manutenção encaminhada como OBRA devem ser "
+            "avaliados em estratos e hipóteses próprios."
+        ),
+        "pair_validity_gate_passed": validity_gate_passed,
+    }
+    if descriptive_pilot:
+        return {
+            **base,
+            "evaluated": False,
+            "reason": (
+                "DESCRIPTIVE_DEVELOPMENT_PILOT_ONLY"
+                if validity_gate_passed
+                else "DESCRIPTIVE_PILOT_AND_PAIR_VALIDITY_GATE_FAILED"
+            ),
+            "margin_local_minus_gemini": margin,
+            "noninferior": None,
+        }
+    if not validity_gate_passed:
+        return {
+            **base,
+            "evaluated": False,
+            "reason": validity_failure_reason or "PAIR_VALIDITY_GATE_FAILED",
+            "margin_local_minus_gemini": margin,
+            "noninferior": None,
+        }
+    if margin is None:
+        return {
+            **base,
+            "evaluated": False,
+            "reason": "MARGIN_NOT_PRE_REGISTERED",
+            "margin_local_minus_gemini": None,
+            "noninferior": None,
+        }
+    if not differences:
+        return {
+            **base,
+            "evaluated": False,
+            "reason": "NO_JOINTLY_VALID_PAIRS",
+            "margin_local_minus_gemini": float(margin),
+            "noninferior": None,
+        }
+    values = [int(value) for value in differences]
+    estimate = sum(values) / len(values)
+    confidence = float(spec.get("confidence") or 0.95)
+    alpha = 1.0 - confidence
+    # Each frozen pair contributes -1, 0 or +1. Hoeffding bounds therefore
+    # remain valid at degenerate boundaries where a percentile bootstrap would
+    # incorrectly collapse to zero width.
+    one_sided_radius = math.sqrt(2.0 * math.log(1.0 / alpha) / len(values))
+    two_sided_radius = math.sqrt(2.0 * math.log(2.0 / alpha) / len(values))
+    lower_one_sided = max(-1.0, estimate - one_sided_radius)
+    lower_two_sided = max(-1.0, estimate - two_sided_radius)
+    upper_two_sided = min(1.0, estimate + two_sided_radius)
+    noninferior = lower_one_sided > -float(margin)
+    return {
+        **base,
+        "evaluated": True,
+        "reason": None,
+        "margin_local_minus_gemini": float(margin),
+        "estimate": estimate,
+        "confidence_interval_95_two_sided": {
+            "lower": lower_two_sided,
+            "upper": upper_two_sided,
+        },
+        "confidence_lower_bound_95_one_sided": lower_one_sided,
+        "method": "paired_hoeffding_distribution_free_bounds",
+        "seed": seed,
+        "decision_rule": "one_sided_95_lower_bound > -margin",
+        "noninferior": noninferior,
+    }
+
+
+def _failure_counts(records: Sequence[dict[str, Any]]) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for row in records:
+        if row.get("ok"):
+            continue
+        code = str(row.get("error_code") or "UNKNOWN")
+        status = row.get("http_status")
+        key = f"{code}:HTTP_{status}" if status is not None else code
+        counts[key] += 1
+    return dict(sorted(counts.items()))
+
+
+def _provider_stability(
+    provider_records: Sequence[dict[str, Any]],
+    expected_unit_ids: set[str],
+) -> dict[str, Any]:
+    expected_records = [
+        row for row in provider_records if str(row.get("unit_id") or "") in expected_unit_ids
+    ]
+    counts_by_unit = Counter(str(row.get("unit_id") or "") for row in expected_records)
+    missing = sum(unit_id not in counts_by_unit for unit_id in expected_unit_ids)
+    duplicate_excess = sum(max(0, count - 1) for count in counts_by_unit.values())
+    single_records = [
+        row
+        for row in expected_records
+        if counts_by_unit[str(row.get("unit_id") or "")] == 1
+    ]
+    valid = sum(bool(row.get("ok")) for row in single_records)
+    invalid = sum(not bool(row.get("ok")) for row in single_records)
+    expected = len(expected_unit_ids)
+    unexpected = sum(
+        str(row.get("unit_id") or "") not in expected_unit_ids
+        for row in provider_records
+    )
+    return {
+        "expected_records": expected,
+        "observed_records": len(expected_records),
+        "single_record_units": len(single_records),
+        "valid_records": valid,
+        "invalid_records": invalid,
+        "missing_records": missing,
+        "duplicate_record_excess": duplicate_excess,
+        "unexpected_unit_records": unexpected,
+        "contract_success_rate_over_planned_units": valid / expected if expected else 0.0,
+        "failure_counts": _failure_counts(single_records),
+    }
+
+
+def _paired_record_contract_matches(
+    local_record: dict[str, Any], remote_record: dict[str, Any]
+) -> bool:
+    """Confirma que os dois provedores receberam a mesma unidade avaliativa.
+
+    Registros históricos anteriores ao hash de entrada continuam comparáveis
+    quando nenhum dos lados declara esse campo. Se apenas um lado o declara, ou
+    se os hashes divergem, o par deixa de ser elegível.
+    """
+
+    if local_record.get("task") != remote_record.get("task"):
+        return False
+    if local_record.get("gold") != remote_record.get("gold"):
+        return False
+    local_hash = local_record.get("shared_input_sha256")
+    remote_hash = remote_record.get("shared_input_sha256")
+    if local_hash is None and remote_hash is None:
+        return True
+    return bool(local_hash) and local_hash == remote_hash
+
+
+def _critical_risk_strata(
+    rows_by_unit: dict[str, dict[str, list[dict[str, Any]]]],
+    expected_ids: set[str],
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    """Produz estimativas pareadas descritivas dos danos operacionais críticos.
+
+    A função deliberadamente não calcula teste, intervalo de não inferioridade
+    ou decisão de adoção. Pares ausentes, duplicados, inválidos ou com contrato
+    divergente não são tratados como eventos seguros: ficam fora do denominador
+    observável e são explicitamente contabilizados.
+    """
+
+    label_counts = (plan.get("sample") or {}).get("label_counts") or {}
+    planned_counts = {
+        "automatic_dedup_false_negative": label_counts.get(
+            "deduplication:DUPLICADO"
+        ),
+        "automatic_maintenance_as_obra": (
+            int(label_counts.get("classification:DEMO") or 0)
+            + int(label_counts.get("classification:SOB_DEMANDA") or 0)
+            if (
+                "classification:DEMO" in label_counts
+                or "classification:SOB_DEMANDA" in label_counts
+            )
+            else None
+        ),
+    }
+    definitions = {
+        "automatic_dedup_false_negative": {
+            "opportunity": lambda task, gold: (
+                task == "deduplication" and gold == "DUPLICADO"
+            ),
+            "event": lambda view: (
+                view["evaluated_label"] == "NAO_DUPLICADO"
+                and not view["routed_to_human"]
+            ),
+            "definition": (
+                "gabarito DUPLICADO e saída automática NAO_DUPLICADO, sem revisão humana"
+            ),
+            "denominator": "unidades com gabarito DUPLICADO e par observável",
+        },
+        "automatic_maintenance_as_obra": {
+            "opportunity": lambda task, gold: (
+                task == "classification" and gold in {"DEMO", "SOB_DEMANDA"}
+            ),
+            "event": lambda view: (
+                view["predicted_class"] == "OBRA"
+                and not view["operational_abstention"]
+                and not view["routed_to_human"]
+            ),
+            "definition": (
+                "gabarito de manutenção (DEMO/SOB_DEMANDA) e encaminhamento "
+                "automático como OBRA, sem revisão humana"
+            ),
+            "denominator": (
+                "unidades com gabarito DEMO/SOB_DEMANDA e par observável"
+            ),
+        },
+    }
+    counters: dict[str, Counter[str]] = {
+        name: Counter() for name in definitions
+    }
+    unidentified_pair_count = 0
+    pair_contract_mismatch_count = 0
+
+    for unit_id in sorted(expected_ids):
+        pair = rows_by_unit.get(unit_id, {})
+        local_rows = pair.get(LOCAL_PROVIDER, [])
+        remote_rows = pair.get(REMOTE_PROVIDER, [])
+        local_record = local_rows[0] if len(local_rows) == 1 else None
+        remote_record = remote_rows[0] if len(remote_rows) == 1 else None
+
+        identity_sources = [
+            row for row in (local_record, remote_record) if row is not None
+        ]
+        identities = {
+            (
+                str(row.get("task") or ""),
+                str((row.get("gold") or {}).get("decision") or ""),
+            )
+            for row in identity_sources
+        }
+        if len(identities) != 1:
+            unidentified_pair_count += 1
+            if len(identities) > 1:
+                pair_contract_mismatch_count += 1
+            continue
+
+        task, gold = next(iter(identities))
+        applicable = [
+            (name, specification)
+            for name, specification in definitions.items()
+            if specification["opportunity"](task, gold)
+        ]
+        if not applicable:
+            continue
+
+        contract_matches = bool(
+            local_record is not None
+            and remote_record is not None
+            and _paired_record_contract_matches(local_record, remote_record)
+        )
+        if (
+            local_record is not None
+            and remote_record is not None
+            and not contract_matches
+        ):
+            pair_contract_mismatch_count += 1
+
+        for name, specification in applicable:
+            counter = counters[name]
+            counter["identified_opportunity_units"] += 1
+            if not contract_matches:
+                counter["invalid_or_incomplete_opportunity_pairs"] += 1
+                continue
+            local_view = _record_semantics(local_record)
+            remote_view = _record_semantics(remote_record)
+            if not local_view["ok"] or not remote_view["ok"]:
+                counter["invalid_or_incomplete_opportunity_pairs"] += 1
+                continue
+
+            counter["observable_pairs"] += 1
+            local_event = bool(specification["event"](local_view))
+            remote_event = bool(specification["event"](remote_view))
+            counter["local_event_count"] += int(local_event)
+            counter["gemini_event_count"] += int(remote_event)
+            counter["local_routed_to_human_count"] += int(
+                local_view["routed_to_human"]
+            )
+            counter["gemini_routed_to_human_count"] += int(
+                remote_view["routed_to_human"]
+            )
+            if local_event and remote_event:
+                counter["both_event"] += 1
+            elif local_event:
+                counter["local_only_event"] += 1
+            elif remote_event:
+                counter["gemini_only_event"] += 1
+            else:
+                counter["neither_event"] += 1
+
+    strata: dict[str, Any] = {}
+    for name, specification in definitions.items():
+        counter = counters[name]
+        observable = counter["observable_pairs"]
+        local_events = counter["local_event_count"]
+        remote_events = counter["gemini_event_count"]
+        planned = planned_counts[name]
+        identified = counter["identified_opportunity_units"]
+        strata[name] = {
+            "definition": specification["definition"],
+            "denominator_definition": specification["denominator"],
+            "planned_opportunity_units_from_frozen_plan": planned,
+            "identified_opportunity_units_from_records": identified,
+            "planned_opportunity_units_not_identified": (
+                max(0, int(planned) - identified) if planned is not None else None
+            ),
+            "opportunity_identification_matches_frozen_plan": (
+                identified == int(planned) if planned is not None else None
+            ),
+            "observable_paired_units": observable,
+            "all_planned_opportunity_units_observable": bool(
+                planned is not None
+                and identified == int(planned)
+                and observable == int(planned)
+            ),
+            "invalid_or_incomplete_opportunity_pairs": counter[
+                "invalid_or_incomplete_opportunity_pairs"
+            ],
+            "local": {
+                "event_count": local_events,
+                "event_rate": local_events / observable if observable else None,
+                "routed_to_human_count": counter["local_routed_to_human_count"],
+            },
+            "gemini": {
+                "event_count": remote_events,
+                "event_rate": remote_events / observable if observable else None,
+                "routed_to_human_count": counter["gemini_routed_to_human_count"],
+            },
+            "paired_event_table": {
+                "both_event": counter["both_event"],
+                "local_only_event": counter["local_only_event"],
+                "gemini_only_event": counter["gemini_only_event"],
+                "neither_event": counter["neither_event"],
+            },
+            "risk_difference_local_minus_gemini": (
+                (local_events - remote_events) / observable if observable else None
+            ),
+            "higher_rate_is_worse": True,
+            "descriptive_only": True,
+            "noninferiority_evaluated": False,
+            "noninferiority_margin": None,
+            "mcnemar_evaluated": False,
+            "zero_observed_events_does_not_imply_zero_risk": True,
+        }
+
+    return {
+        "analysis_type": "PAIRED_DESCRIPTIVE_CRITICAL_RISK_STRATIFICATION",
+        "confirmatory_claim_allowed": False,
+        "noninferiority_evaluated": False,
+        "noninferiority_margin": None,
+        "inferential_test_performed": False,
+        "pair_contract_mismatch_count": pair_contract_mismatch_count,
+        "unidentified_expected_pair_count": unidentified_pair_count,
+        "interpretation": (
+            "Diferenças local-Gemini são estimativas descritivas. Uma margem, "
+            "hipótese, unidade independente e regra de decisão devem ser "
+            "pré-registradas separadamente por risco antes do holdout."
+        ),
+        "strata": strata,
+    }
+
+
 def summarize(
-    records: Sequence[dict[str, Any]], plan: dict[str, Any]
+    records: Sequence[dict[str, Any]],
+    plan: dict[str, Any],
+    *,
+    expected_unit_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     by_provider: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    by_unit: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    rows_by_unit: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
     for row in records:
-        by_provider[row["provider"]].append(row)
-        by_unit[row["unit_id"]][row["provider"]] = row
+        provider = str(row.get("provider") or "")
+        unit_id = str(row.get("unit_id") or "")
+        by_provider[provider].append(row)
+        rows_by_unit[unit_id][provider].append(row)
+
+    observed_unit_ids = {unit_id for unit_id in rows_by_unit if unit_id}
+    identity_verified = expected_unit_ids is not None
+    if expected_unit_ids is None:
+        expected_ids = set(observed_unit_ids)
+    else:
+        expected_list = [str(unit_id) for unit_id in expected_unit_ids]
+        expected_ids = set(expected_list)
+        if len(expected_ids) != len(expected_list) or "" in expected_ids:
+            identity_verified = False
+    planned_count = int((plan.get("sample") or {}).get("units") or len(expected_ids))
+    plan_count_matches_units = planned_count == len(expected_ids)
+    missing_unit_ids = expected_ids - observed_unit_ids
+    unexpected_unit_ids = observed_unit_ids - expected_ids
+    duplicate_record_excess = sum(
+        max(0, len(provider_rows) - 1)
+        for unit_id in expected_ids
+        for provider_rows in rows_by_unit.get(unit_id, {}).values()
+    )
+    unexpected_provider_records = sum(
+        len(provider_rows)
+        for unit_id in expected_ids
+        for provider, provider_rows in rows_by_unit.get(unit_id, {}).items()
+        if provider not in {LOCAL_PROVIDER, REMOTE_PROVIDER}
+    )
+    pair_contract_mismatch_count = 0
+    for unit_id in expected_ids:
+        pair = rows_by_unit.get(unit_id, {})
+        local_rows = pair.get(LOCAL_PROVIDER, [])
+        remote_rows = pair.get(REMOTE_PROVIDER, [])
+        if len(local_rows) == 1 and len(remote_rows) == 1 and not _paired_record_contract_matches(
+            local_rows[0], remote_rows[0]
+        ):
+            pair_contract_mismatch_count += 1
+
     both_correct = local_only = gemini_only = both_not_correct = 0
-    attempted_pairs = jointly_valid_pairs = 0
+    attempted_pairs = jointly_valid_pairs = record_complete_pairs = 0
     local_invalid_pairs = remote_invalid_pairs = both_invalid_pairs = 0
-    for pair in by_unit.values():
-        if LOCAL_PROVIDER not in pair or REMOTE_PROVIDER not in pair:
-            continue
-        attempted_pairs += 1
-        local_view = _record_semantics(pair[LOCAL_PROVIDER])
-        remote_view = _record_semantics(pair[REMOTE_PROVIDER])
-        if not local_view["ok"] or not remote_view["ok"]:
-            local_invalid_pairs += int(not local_view["ok"])
-            remote_invalid_pairs += int(not remote_view["ok"])
-            both_invalid_pairs += int(not local_view["ok"] and not remote_view["ok"])
-            continue
-        jointly_valid_pairs += 1
-        local_correct = bool(local_view["correct"])
-        gemini_correct = bool(remote_view["correct"])
-        if local_correct and gemini_correct:
-            both_correct += 1
-        elif local_correct:
-            local_only += 1
-        elif gemini_correct:
-            gemini_only += 1
+    paired_differences: list[int] = []
+    conservative_local_correct = conservative_remote_correct = 0
+    conservative_both_correct = conservative_local_only = 0
+    conservative_remote_only = conservative_both_not_correct = 0
+    for unit_id in sorted(expected_ids):
+        pair = rows_by_unit.get(unit_id, {})
+        local_rows = pair.get(LOCAL_PROVIDER, [])
+        remote_rows = pair.get(REMOTE_PROVIDER, [])
+        if local_rows and remote_rows:
+            attempted_pairs += 1
+        local_record = local_rows[0] if len(local_rows) == 1 else None
+        remote_record = remote_rows[0] if len(remote_rows) == 1 else None
+        if local_record is not None and remote_record is not None:
+            record_complete_pairs += 1
+        local_view = _record_semantics(local_record) if local_record is not None else None
+        remote_view = _record_semantics(remote_record) if remote_record is not None else None
+        local_valid = bool(local_view and local_view["ok"])
+        remote_valid = bool(remote_view and remote_view["ok"])
+        pair_contract_valid = bool(
+            local_record is not None
+            and remote_record is not None
+            and _paired_record_contract_matches(local_record, remote_record)
+        )
+        if not local_valid or not remote_valid:
+            local_invalid_pairs += int(not local_valid)
+            remote_invalid_pairs += int(not remote_valid)
+            both_invalid_pairs += int(not local_valid and not remote_valid)
+        elif pair_contract_valid:
+            jointly_valid_pairs += 1
+            local_is_correct = bool(local_view["correct"])
+            remote_is_correct = bool(remote_view["correct"])
+            paired_differences.append(int(local_is_correct) - int(remote_is_correct))
+            if local_is_correct and remote_is_correct:
+                both_correct += 1
+            elif local_is_correct:
+                local_only += 1
+            elif remote_is_correct:
+                gemini_only += 1
+            else:
+                both_not_correct += 1
+
+        # Composto operacional conservador: ausência/duplicação do próprio
+        # registro, falha e abstenção contam como incorreto. Se os dois registros
+        # existem mas descrevem unidades diferentes, nenhum sustenta a comparação
+        # pareada; a ausência do outro provedor, por si só, não apaga o resultado
+        # observável do provedor presente.
+        pair_identity_conflict = bool(
+            local_record is not None
+            and remote_record is not None
+            and not pair_contract_valid
+        )
+        local_composite_correct = bool(
+            not pair_identity_conflict
+            and local_valid
+            and local_view
+            and local_view["correct"]
+        )
+        remote_composite_correct = bool(
+            not pair_identity_conflict
+            and remote_valid
+            and remote_view
+            and remote_view["correct"]
+        )
+        conservative_local_correct += int(local_composite_correct)
+        conservative_remote_correct += int(remote_composite_correct)
+        if local_composite_correct and remote_composite_correct:
+            conservative_both_correct += 1
+        elif local_composite_correct:
+            conservative_local_only += 1
+        elif remote_composite_correct:
+            conservative_remote_only += 1
         else:
-            both_not_correct += 1
+            conservative_both_not_correct += 1
+
+    all_pairs_valid = bool(
+        identity_verified
+        and plan_count_matches_units
+        and expected_ids
+        and not missing_unit_ids
+        and not unexpected_unit_ids
+        and duplicate_record_excess == 0
+        and unexpected_provider_records == 0
+        and pair_contract_mismatch_count == 0
+        and jointly_valid_pairs == len(expected_ids)
+    )
+    descriptive_pilot = (
+        (plan.get("paired_design") or {}).get("analysis_intent")
+        == "DESCRIPTIVE_DEVELOPMENT_PILOT"
+        or (plan.get("dataset") or {}).get("split") == "DESENVOLVIMENTO"
+    )
+    validity_blockers: list[str] = []
+    if not identity_verified:
+        validity_blockers.append("EXPECTED_UNIT_IDENTITIES_NOT_VERIFIED")
+    if not plan_count_matches_units:
+        validity_blockers.append("PLAN_UNIT_COUNT_MISMATCH")
+    if missing_unit_ids:
+        validity_blockers.append("MISSING_PLANNED_UNITS")
+    if unexpected_unit_ids:
+        validity_blockers.append("UNEXPECTED_UNITS")
+    if duplicate_record_excess:
+        validity_blockers.append("DUPLICATE_PROVIDER_RECORDS")
+    if unexpected_provider_records:
+        validity_blockers.append("UNEXPECTED_PROVIDER_RECORDS")
+    if pair_contract_mismatch_count:
+        validity_blockers.append("PAIR_TASK_GOLD_OR_INPUT_HASH_MISMATCH")
+    if jointly_valid_pairs < len(expected_ids):
+        validity_blockers.append("INVALID_OR_INCOMPLETE_PAIRS")
+
+    if not expected_ids or jointly_valid_pairs == 0:
+        comparison_status = "REJECTED_NO_JOINTLY_VALID_PAIRS"
+    elif not all_pairs_valid:
+        comparison_status = "REJECTED_INCOMPLETE_OR_INVALID_PAIRS"
+    elif descriptive_pilot:
+        comparison_status = "DESCRIPTIVE_PILOT_COMPLETE"
+    else:
+        comparison_status = "PRELIMINARY_COMPLETE_PAIRS_PENDING_GOLD_GATE"
     usage = [
         row["usage"]
         for row in by_provider.get(REMOTE_PROVIDER, [])
@@ -1696,12 +2711,6 @@ def summarize(
         for item in usage
         if isinstance(item.get("total_tokens"), int)
     )
-    if jointly_valid_pairs == 0:
-        comparison_status = "REJECTED_NO_JOINTLY_VALID_PAIRS"
-    elif jointly_valid_pairs < attempted_pairs:
-        comparison_status = "PARTIAL_VALID_PAIRS_NON_CONFIRMATORY"
-    else:
-        comparison_status = "PRELIMINARY_VALID_PAIRS_PENDING_GOLD_GATE"
     return {
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "status": comparison_status,
@@ -1713,11 +2722,31 @@ def summarize(
             provider: _provider_metrics(provider_records)
             for provider, provider_records in sorted(by_provider.items())
         },
+        "stability": {
+            "expected_pair_count": len(expected_ids),
+            "expected_unit_identities_verified": identity_verified,
+            "plan_unit_count_matches_expected_ids": plan_count_matches_units,
+            "observed_unique_unit_count": len(observed_unit_ids),
+            "missing_planned_unit_count": len(missing_unit_ids),
+            "unexpected_unit_count": len(unexpected_unit_ids),
+            "duplicate_provider_record_excess": duplicate_record_excess,
+            "unexpected_provider_records": unexpected_provider_records,
+            "pair_contract_mismatch_count": pair_contract_mismatch_count,
+            "all_planned_pairs_present_and_valid": all_pairs_valid,
+            "validity_blockers": validity_blockers,
+            "local": _provider_stability(
+                by_provider.get(LOCAL_PROVIDER, []), expected_ids
+            ),
+            "remote": _provider_stability(
+                by_provider.get(REMOTE_PROVIDER, []), expected_ids
+            ),
+        },
         "paired": {
             "attempted_pairs": attempted_pairs,
+            "record_complete_pairs": record_complete_pairs,
             "jointly_valid_pairs": jointly_valid_pairs,
             "complete_pairs": jointly_valid_pairs,
-            "invalid_pairs": attempted_pairs - jointly_valid_pairs,
+            "invalid_pairs": len(expected_ids) - jointly_valid_pairs,
             "local_invalid_pairs": local_invalid_pairs,
             "remote_invalid_pairs": remote_invalid_pairs,
             "both_invalid_pairs": both_invalid_pairs,
@@ -1727,13 +2756,78 @@ def summarize(
             "both_not_correct": both_not_correct,
             "mcnemar_exact_two_sided_p": (
                 exact_mcnemar_p(local_only, gemini_only)
-                if jointly_valid_pairs
+                if all_pairs_valid and not descriptive_pilot
                 else None
             ),
-            "mcnemar_evaluable": jointly_valid_pairs > 0,
+            "mcnemar_evaluable": all_pairs_valid and not descriptive_pilot,
+            "mcnemar_suppressed_for_descriptive_pilot": (
+                all_pairs_valid and descriptive_pilot
+            ),
+            "mcnemar_not_evaluated_reason": (
+                "PAIR_VALIDITY_GATE_FAILED"
+                if not all_pairs_valid
+                else "DESCRIPTIVE_DEVELOPMENT_PILOT_ONLY"
+                if descriptive_pilot
+                else None
+            ),
             "comparison_status": comparison_status,
             "abstention_counted_as_not_correct_for_pair_test": True,
+            "complete_case_point_estimate": {
+                "estimand": "overall_accuracy_local_minus_accuracy_gemini",
+                "jointly_valid_pairs": jointly_valid_pairs,
+                "estimate": (
+                    sum(paired_differences) / jointly_valid_pairs
+                    if jointly_valid_pairs
+                    else None
+                ),
+                "descriptive_only": True,
+                "selection_warning": (
+                    "Pode sofrer viés de sobrevivência quando há pares inválidos; "
+                    "não sustenta decisão inferencial."
+                ),
+            },
         },
+        "conservative_availability_accuracy_composite": {
+            "evaluated": identity_verified and plan_count_matches_units,
+            "descriptive_only": True,
+            "denominator_planned_pairs": len(expected_ids),
+            "failure_missing_duplicate_or_abstention_counted_as_incorrect": True,
+            "local_accuracy": (
+                conservative_local_correct / len(expected_ids)
+                if expected_ids and identity_verified and plan_count_matches_units
+                else None
+            ),
+            "gemini_accuracy": (
+                conservative_remote_correct / len(expected_ids)
+                if expected_ids and identity_verified and plan_count_matches_units
+                else None
+            ),
+            "difference_local_minus_gemini": (
+                (conservative_local_correct - conservative_remote_correct)
+                / len(expected_ids)
+                if expected_ids and identity_verified and plan_count_matches_units
+                else None
+            ),
+            "both_correct": conservative_both_correct,
+            "local_only_correct": conservative_local_only,
+            "gemini_only_correct": conservative_remote_only,
+            "both_not_correct": conservative_both_not_correct,
+            "noninferiority_decision_allowed": False,
+            "critical_risk_h2_evaluated": False,
+        },
+        "critical_risk_strata": _critical_risk_strata(
+            rows_by_unit,
+            expected_ids,
+            plan,
+        ),
+        "noninferiority": paired_noninferiority(
+            paired_differences,
+            plan.get("noninferiority"),
+            seed=int((plan.get("paired_design") or {}).get("seed") or DEFAULT_SEED),
+            validity_gate_passed=all_pairs_valid,
+            validity_failure_reason="PAIR_VALIDITY_GATE_FAILED",
+            descriptive_pilot=descriptive_pilot,
+        ),
         "remote_budget_observed": {
             "calls": len(by_provider.get(REMOTE_PROVIDER, [])),
             "reported_total_tokens": total_tokens,
@@ -1854,8 +2948,11 @@ def resummarize_existing(
     local_plan = source_dir / LOCAL_PLAN_FILENAME
     paired_results = source_dir / RESULTS_FILENAME
     paired_plan = source_dir / PLAN_FILENAME
+    paired_units = source_dir / UNITS_FILENAME
     local_mode = local_results.is_file() and local_plan.is_file()
-    paired_mode = paired_results.is_file() and paired_plan.is_file()
+    paired_mode = (
+        paired_results.is_file() and paired_plan.is_file() and paired_units.is_file()
+    )
     if local_mode == paired_mode:
         raise BenchmarkGuardError(
             "Diretório deve conter exatamente um conjunto completo LOCAL-only ou pareado."
@@ -1869,11 +2966,15 @@ def resummarize_existing(
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     if not isinstance(plan, dict):
         raise BenchmarkGuardError("Plano histórico inválido.")
-    summary = (
-        summarize_local_only(records, plan)
-        if local_mode
-        else summarize(records, plan)
-    )
+    if local_mode:
+        summary = summarize_local_only(records, plan)
+    else:
+        frozen_units = load_jsonl(paired_units)
+        summary = summarize(
+            records,
+            plan,
+            expected_unit_ids=[str(unit.get("unit_id") or "") for unit in frozen_units],
+        )
     original_summary: dict[str, Any] = {}
     if original_summary_path.is_file():
         loaded = json.loads(original_summary_path.read_text(encoding="utf-8"))
@@ -1982,8 +3083,61 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-remote-calls", type=int)
     parser.add_argument("--max-remote-tokens", type=int)
     parser.add_argument("--max-rpm", type=int)
+    parser.add_argument(
+        "--max-tpm",
+        type=int,
+        help=(
+            "TPM ativo do projeto, copiado do AI Studio imediatamente antes da execução."
+        ),
+    )
+    parser.add_argument(
+        "--max-remote-rpd",
+        type=int,
+        help="Limite conservador de tentativas Gemini em uma janela móvel de 24h.",
+    )
+    parser.add_argument(
+        "--remote-attempt-ledger",
+        type=Path,
+        default=DEFAULT_REMOTE_ATTEMPT_LEDGER,
+    )
+    parser.add_argument(
+        "--noninferiority-margin",
+        type=float,
+        help=(
+            "Margem pré-registrada para a diferença de acurácia geral LOCAL - "
+            "Gemini no corpus reservado. Não mede riscos críticos H2, não é "
+            "aceita em --development-paired e, se omitida, a não inferioridade "
+            "não é avaliada."
+        ),
+    )
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--confirm-remote-execution", action="store_true")
+    parser.add_argument(
+        "--confirm-active-quota-checked",
+        action="store_true",
+        help="Confirma que RPM/TPM/RPD ativos foram conferidos no AI Studio.",
+    )
+    parser.add_argument(
+        "--confirm-billing-status-checked",
+        action="store_true",
+        help=(
+            "Confirma que o tier/faturamento do projeto foi conferido; Free Tier não "
+            "pode ser inferido a partir da chave."
+        ),
+    )
+    parser.add_argument(
+        "--confirm-exclusive-quota-window",
+        action="store_true",
+        help=(
+            "Confirma que nenhum outro processo usa o mesmo projeto Gemini durante o ensaio."
+        ),
+    )
+    parser.add_argument(
+        "--quota-utilization",
+        type=float,
+        default=DEFAULT_QUOTA_UTILIZATION,
+        help="Fração conservadora das cotas declaradas usada pelo executor (padrão 0,80).",
+    )
     parser.add_argument("--gemini-key-env", default="GEMINI_API_KEY")
     parser.add_argument("--local-token-env", default="IA_LOCAL_API_TOKEN")
     parser.add_argument("--local-base-url", default="http://127.0.0.1:8090")
@@ -1999,10 +3153,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             args.max_remote_calls,
             args.max_remote_tokens,
             args.max_rpm,
+            args.max_tpm,
+            args.max_remote_rpd,
         )
     ):
         parser.error(
-            "modo pareado exige --max-remote-calls, --max-remote-tokens e --max-rpm"
+            "modo pareado exige --max-remote-calls, --max-remote-tokens, "
+            "--max-rpm, --max-tpm e --max-remote-rpd"
         )
     return args
 
@@ -2148,12 +3305,29 @@ def _main_local_only(args: argparse.Namespace) -> int:
             local_token=local_token,
             timeout_seconds=args.timeout_seconds,
         )
+    except BenchmarkExecutionAborted as exc:
+        records = exc.records
+        predictions_sha256 = write_jsonl(results_path, records)
+        summary = summarize_local_only(records, plan)
+        summary["status"] = "LOCAL_ONLY_EXECUTION_ABORTED_INVALID"
+        summary["execution_abort"] = {
+            "phase": exc.phase,
+            "message": str(exc),
+            "processed_records": len(records),
+            "planned_records": len(units),
+        }
+        summary["predictions_sha256"] = predictions_sha256
+        summary_path.write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        raise SystemExit(
+            "Execução LOCAL-only inválida e interrompida; artefatos parciais "
+            f"preservados em {output_dir}."
+        ) from exc
     except BenchmarkGuardError as exc:
         raise SystemExit(str(exc)) from exc
-    results_path.write_text(
-        "".join(canonical_json(row) + "\n" for row in records), encoding="utf-8"
-    )
-    predictions_sha256 = sha256_file(results_path)
+    predictions_sha256 = write_jsonl(results_path, records)
     summary = summarize_local_only(records, plan)
     summary["predictions_sha256"] = predictions_sha256
     summary_path.write_text(
@@ -2170,7 +3344,14 @@ def _main_local_only(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     if args.resummarize_existing is not None:
-        if args.local_only or args.execute or args.confirm_remote_execution:
+        if (
+            args.local_only
+            or args.execute
+            or args.confirm_remote_execution
+            or args.confirm_active_quota_checked
+            or args.confirm_billing_status_checked
+            or args.confirm_exclusive_quota_window
+        ):
             raise SystemExit(
                 "--resummarize-existing não aceita execução local/remota nem confirmações."
             )
@@ -2185,9 +3366,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     if args.local_only:
-        if args.confirm_remote_execution:
+        if (
+            args.confirm_remote_execution
+            or args.confirm_active_quota_checked
+            or args.confirm_billing_status_checked
+            or args.confirm_exclusive_quota_window
+        ):
             raise SystemExit(
-                "--confirm-remote-execution é incompatível com --local-only"
+                "Confirmações remotas são incompatíveis com --local-only"
             )
         if any(
             value is not None
@@ -2195,6 +3381,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.max_remote_calls,
                 args.max_remote_tokens,
                 args.max_rpm,
+                args.max_tpm,
+                args.max_remote_rpd,
+                args.noninferiority_margin,
             )
         ):
             raise SystemExit("Modo LOCAL-only não aceita limites remotos")
@@ -2226,8 +3415,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise SystemExit("Nome de variável de credencial inválido")
     if args.execute and not args.confirm_remote_execution:
         raise SystemExit("--execute exige --confirm-remote-execution")
+    if args.execute and not args.confirm_active_quota_checked:
+        raise SystemExit(
+            "--execute exige --confirm-active-quota-checked após conferir o AI Studio"
+        )
+    if args.execute and not args.confirm_billing_status_checked:
+        raise SystemExit(
+            "--execute exige --confirm-billing-status-checked para evitar custo não intencional"
+        )
+    if args.execute and not args.confirm_exclusive_quota_window:
+        raise SystemExit(
+            "--execute exige --confirm-exclusive-quota-window porque a cota é por projeto"
+        )
     if args.timeout_seconds <= 0:
         raise SystemExit("--timeout-seconds deve ser positivo")
+    if args.noninferiority_margin is not None and not (
+        0.0 < args.noninferiority_margin < 1.0
+    ):
+        raise SystemExit("--noninferiority-margin deve estar entre 0 e 1.")
+    if args.development_paired and args.noninferiority_margin is not None:
+        raise SystemExit(
+            "O piloto --development-paired é exclusivamente descritivo e não "
+            "aceita --noninferiority-margin."
+        )
+    if not 0 < args.quota_utilization <= 1:
+        raise SystemExit("--quota-utilization deve estar no intervalo (0, 1]")
 
     dataset = args.dataset or DEFAULT_DATASET
     dataset_manifest = args.dataset_manifest or DEFAULT_DATASET_MANIFEST
@@ -2277,6 +3489,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_remote_calls=args.max_remote_calls,
             max_remote_tokens=args.max_remote_tokens,
             max_rpm=args.max_rpm,
+            max_remote_rpd=args.max_remote_rpd,
+            max_tpm=args.max_tpm,
+            quota_utilization=args.quota_utilization,
         )
     except BenchmarkGuardError as exc:
         raise SystemExit(str(exc)) from exc
@@ -2295,6 +3510,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         gemini_model=args.gemini_model,
         max_output_tokens_per_call=args.max_output_tokens_per_call,
         budget=budget,
+        noninferiority_margin=args.noninferiority_margin,
     )
     try:
         manifest_path, units_path, reused = freeze_plan(
@@ -2331,17 +3547,49 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_remote_calls=args.max_remote_calls,
             max_remote_tokens=args.max_remote_tokens,
             max_rpm=args.max_rpm,
+            max_remote_rpd=args.max_remote_rpd,
+            max_tpm=args.max_tpm,
+            quota_utilization=args.quota_utilization,
+            remote_attempt_ledger=args.remote_attempt_ledger,
+            plan_sha256=str(plan["manifest_payload_sha256"]),
             max_output_tokens_per_call=args.max_output_tokens_per_call,
             seed=args.seed,
             timeout_seconds=args.timeout_seconds,
         )
+    except BenchmarkExecutionAborted as exc:
+        records = exc.records
+        predictions_sha256 = write_jsonl(results_path, records)
+        summary = summarize(
+            records,
+            plan,
+            expected_unit_ids=[str(unit["unit_id"]) for unit in units],
+        )
+        summary["status"] = "EXECUTION_ABORTED_NON_COMPARABLE"
+        summary["execution_abort"] = {
+            "aborted": True,
+            "phase": exc.phase,
+            "reason": redact(str(exc), [gemini_key, local_token]),
+            "records_preserved": len(records),
+            "remote_retry_performed": False,
+        }
+        summary["predictions_sha256"] = predictions_sha256
+        summary_path.write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        raise SystemExit(
+            f"{exc} Registros parciais preservados em {results_path}; "
+            f"resumo não comparável em {summary_path}."
+        ) from exc
     except BenchmarkGuardError as exc:
         raise SystemExit(str(exc)) from exc
-    results_path.write_text(
-        "".join(canonical_json(row) + "\n" for row in records), encoding="utf-8"
+    predictions_sha256 = write_jsonl(results_path, records)
+    summary = summarize(
+        records,
+        plan,
+        expected_unit_ids=[str(unit["unit_id"]) for unit in units],
     )
-    summary = summarize(records, plan)
-    summary["predictions_sha256"] = sha256_file(results_path)
+    summary["predictions_sha256"] = predictions_sha256
     summary_path.write_text(
         json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

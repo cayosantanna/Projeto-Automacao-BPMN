@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -24,12 +25,37 @@ class PairedBenchmarkPlanTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.rows = paired.load_jsonl(paired.DEFAULT_DATASET)
         cls.audit = paired.validate_reserved_dataset(
-            paired.DEFAULT_DATASET, paired.DEFAULT_DATASET_MANIFEST, cls.rows
+            paired.DEFAULT_DATASET,
+            paired.DEFAULT_DATASET_MANIFEST,
+            cls.rows,
+            require_confirmatory_eligible=False,
         )
         cls.local_candidate = paired.validate_local_candidate(
             paired.DEFAULT_LOCAL_MODEL_MANIFEST
         )
         cls.units = paired.build_units(cls.rows)
+
+    def test_exposed_historical_test_corpus_is_not_confirmatory_holdout(self) -> None:
+        with self.assertRaisesRegex(
+            paired.BenchmarkGuardError, "não está elegível como holdout confirmatório"
+        ):
+            paired.validate_reserved_dataset(
+                paired.DEFAULT_DATASET,
+                paired.DEFAULT_DATASET_MANIFEST,
+                self.rows,
+            )
+
+    def test_remote_registry_keeps_paid_deepseek_candidate_blocked(self) -> None:
+        registry = json.loads(
+            (ROOT / "avaliacao" / "config" / "modelos_ia_v1.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        candidate = registry["remote_benchmark_candidates"]["DEEPSEEK_V4_FLASH"]
+        self.assertEqual(candidate["model"], "deepseek-v4-flash")
+        self.assertFalse(candidate["guaranteed_free_api_tier"])
+        self.assertFalse(candidate["active_operational_role"])
+        self.assertTrue(candidate["benchmark_role"].startswith("blocked_"))
 
     def test_sample_is_deterministic_independent_core_and_balanced(self) -> None:
         repeated = paired.build_units(self.rows)
@@ -88,12 +114,51 @@ class PairedBenchmarkPlanTests(unittest.TestCase):
         requirements = paired.budget_requirements(self.units)
         self.assertEqual(requirements["remote_calls"], 140)
         self.assertGreater(requirements["remote_tokens_conservative"], 140 * 768)
+        self.assertGreater(requirements["max_remote_tokens_per_call_conservative"], 768)
         with self.assertRaisesRegex(paired.BenchmarkGuardError, "Orçamento remoto insuficiente"):
             paired.preflight_budget(
                 requirements,
                 max_remote_calls=139,
                 max_remote_tokens=requirements["remote_tokens_conservative"],
                 max_rpm=10,
+                max_tpm=1000000,
+                max_remote_rpd=140,
+            )
+
+    def test_preflight_applies_explicit_quota_headroom(self) -> None:
+        requirements = {
+            "remote_calls": 2,
+            "remote_tokens_conservative": 1200,
+            "max_remote_tokens_per_call_conservative": 700,
+        }
+        budget = paired.preflight_budget(
+            requirements,
+            max_remote_calls=2,
+            max_remote_tokens=2000,
+            max_rpm=15,
+            max_tpm=1000,
+            max_remote_rpd=10,
+            quota_utilization=0.80,
+        )
+        self.assertEqual(
+            budget["effective_limits"],
+            {"rpm": 12, "tpm": 800, "rpd_conservative_rolling_24h": 8},
+        )
+
+    def test_single_call_larger_than_effective_tpm_fails_before_execution(self) -> None:
+        with self.assertRaisesRegex(paired.BenchmarkGuardError, "TPM efetivo"):
+            paired.preflight_budget(
+                {
+                    "remote_calls": 1,
+                    "remote_tokens_conservative": 900,
+                    "max_remote_tokens_per_call_conservative": 900,
+                },
+                max_remote_calls=1,
+                max_remote_tokens=1000,
+                max_rpm=15,
+                max_tpm=1000,
+                max_remote_rpd=10,
+                quota_utilization=0.80,
             )
 
     def test_plan_is_frozen_idempotently_and_never_overwritten(self) -> None:
@@ -103,6 +168,8 @@ class PairedBenchmarkPlanTests(unittest.TestCase):
             max_remote_calls=140,
             max_remote_tokens=requirements["remote_tokens_conservative"],
             max_rpm=10,
+            max_tpm=1000000,
+            max_remote_rpd=140,
         )
         plan, units_bytes = paired.build_plan(
             dataset=paired.DEFAULT_DATASET,
@@ -119,11 +186,19 @@ class PairedBenchmarkPlanTests(unittest.TestCase):
             gemini_model=paired.DEFAULT_MODEL,
             max_output_tokens_per_call=768,
             budget=budget,
+            noninferiority_margin=None,
         )
         self.assertFalse(plan["scientific_status"]["scientific_result"])
         self.assertFalse(plan["scientific_status"]["confirmatory_claim_allowed"])
         self.assertFalse(plan["remote"]["fallback_enabled"])
         self.assertFalse(plan["remote"]["retry_enabled"])
+        self.assertFalse(plan["noninferiority"]["pre_registered"])
+        self.assertIsNone(plan["noninferiority"]["margin_local_minus_gemini"])
+        critical = plan["critical_risk_comparison"]
+        self.assertEqual(critical["analysis_type"], "PAIRED_DESCRIPTIVE_ONLY")
+        self.assertFalse(critical["noninferiority_evaluated"])
+        self.assertIsNone(critical["noninferiority_margin"])
+        self.assertFalse(critical["confirmatory_claim_allowed"])
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "plan"
             _, _, reused = paired.freeze_plan(output, plan, units_bytes, execute=False)
@@ -139,19 +214,51 @@ class PairedBenchmarkPlanTests(unittest.TestCase):
                     Path(temporary) / "missing", plan, units_bytes, execute=True
                 )
 
-    def test_cli_requires_all_three_remote_limits(self) -> None:
+    def test_cli_requires_all_five_remote_limits(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
                 paired.parse_args([])
 
+    def test_execute_requires_live_quota_billing_and_exclusive_window_gates(self) -> None:
+        base = [
+            "--development-paired",
+            "--max-remote-calls",
+            "140",
+            "--max-remote-tokens",
+            "2000000",
+            "--max-rpm",
+            "15",
+            "--max-tpm",
+            "1000000",
+            "--max-remote-rpd",
+            "1500",
+            "--execute",
+            "--confirm-remote-execution",
+        ]
+        with self.assertRaisesRegex(SystemExit, "active-quota-checked"):
+            paired.main(base)
+        with self.assertRaisesRegex(SystemExit, "billing-status-checked"):
+            paired.main([*base, "--confirm-active-quota-checked"])
+        with self.assertRaisesRegex(SystemExit, "exclusive-quota-window"):
+            paired.main(
+                [
+                    *base,
+                    "--confirm-active-quota-checked",
+                    "--confirm-billing-status-checked",
+                ]
+            )
 
 
-    def test_default_main_is_dry_run_and_creates_no_predictions(self) -> None:
+
+    def test_default_main_rejects_exposed_historical_test_corpus(self) -> None:
         requirements = paired.budget_requirements(self.units)
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "frozen"
-            with contextlib.redirect_stdout(io.StringIO()) as stdout:
-                code = paired.main(
+            with self.assertRaisesRegex(
+                paired.BenchmarkGuardError,
+                "não está elegível como holdout confirmatório",
+            ):
+                paired.main(
                     [
                         "--output-dir",
                         str(output),
@@ -161,12 +268,14 @@ class PairedBenchmarkPlanTests(unittest.TestCase):
                         str(requirements["remote_tokens_conservative"]),
                         "--max-rpm",
                         "10",
+                        "--max-tpm",
+                        "1000000",
+                        "--max-remote-rpd",
+                        str(requirements["remote_calls"]),
                     ]
                 )
-            self.assertEqual(code, 0)
-            self.assertIn("Nenhuma API", stdout.getvalue())
-            self.assertTrue((output / paired.PLAN_FILENAME).is_file())
-            self.assertTrue((output / paired.UNITS_FILENAME).is_file())
+            self.assertFalse((output / paired.PLAN_FILENAME).exists())
+            self.assertFalse((output / paired.UNITS_FILENAME).exists())
             self.assertFalse((output / paired.RESULTS_FILENAME).exists())
 
 
@@ -180,6 +289,35 @@ class PairedBenchmarkExecutionGuardsTests(unittest.TestCase):
             next(unit for unit in all_units if unit["task"] == "deduplication"),
         ]
 
+    def test_sliding_limiter_enforces_rpm_and_reserved_tpm(self) -> None:
+        now = [0.0]
+        sleeps: list[float] = []
+
+        def clock() -> float:
+            return now[0]
+
+        def sleeper(seconds: float) -> None:
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        limiter = paired.SlidingMinuteQuotaLimiter(
+            max_rpm=2,
+            max_tpm=100,
+            clock=clock,
+            sleeper=sleeper,
+        )
+        self.assertEqual(limiter.acquire(40), 0.0)
+        self.assertEqual(limiter.acquire(40), 0.0)
+        waited = limiter.acquire(30)
+        self.assertGreaterEqual(waited, 60.0)
+        self.assertEqual(len(sleeps), 1)
+        self.assertEqual(len(limiter.events), 1)
+
+    def test_sliding_limiter_rejects_one_call_above_tpm(self) -> None:
+        limiter = paired.SlidingMinuteQuotaLimiter(max_rpm=12, max_tpm=100)
+        with self.assertRaisesRegex(paired.BenchmarkGuardError, "excede o TPM"):
+            limiter.acquire(101)
+
     def test_preflight_refuses_before_any_transport_call(self) -> None:
         calls: list[str] = []
 
@@ -188,23 +326,28 @@ class PairedBenchmarkExecutionGuardsTests(unittest.TestCase):
             return 500, {}
 
         requirements = paired.budget_requirements(self.units)
-        with self.assertRaisesRegex(paired.BenchmarkGuardError, "Orçamento remoto insuficiente"):
-            paired.run_execution(
-                self.units,
-                gemini_model=paired.DEFAULT_MODEL,
-                local_model="local-hybrid-v1.1.0",
-                gemini_key="dummy-secret",
-                local_base_url="http://127.0.0.1:8090",
-                local_token="",
-                max_remote_calls=1,
-                max_remote_tokens=requirements["remote_tokens_conservative"],
-                max_rpm=100,
-                max_output_tokens_per_call=768,
-                seed=paired.DEFAULT_SEED,
-                timeout_seconds=1,
-                post_json=transport,
-                sleeper=lambda _: None,
-            )
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(paired.BenchmarkGuardError, "Orçamento remoto insuficiente"):
+                paired.run_execution(
+                    self.units,
+                    gemini_model=paired.DEFAULT_MODEL,
+                    local_model="local-hybrid-v1.1.0",
+                    gemini_key="dummy-secret",
+                    local_base_url="http://127.0.0.1:8090",
+                    local_token="",
+                    max_remote_calls=1,
+                    max_remote_tokens=requirements["remote_tokens_conservative"],
+                    max_rpm=100,
+                    max_tpm=1000000,
+                    max_remote_rpd=2,
+                    remote_attempt_ledger=Path(temporary) / "ledger.json",
+                    plan_sha256="a" * 64,
+                    max_output_tokens_per_call=768,
+                    seed=paired.DEFAULT_SEED,
+                    timeout_seconds=1,
+                    post_json=transport,
+                    sleeper=lambda _: None,
+                )
         self.assertEqual(calls, [])
 
     def test_exactly_one_gemini_call_per_unit_and_no_fallback(self) -> None:
@@ -262,22 +405,33 @@ class PairedBenchmarkExecutionGuardsTests(unittest.TestCase):
             }
 
         requirements = paired.budget_requirements(self.units)
-        records = paired.run_execution(
-            self.units,
-            gemini_model=paired.DEFAULT_MODEL,
-            local_model="local-hybrid-v1.1.0",
-            gemini_key="dummy-secret-not-logged",
-            local_base_url="http://127.0.0.1:8090",
-            local_token="local-secret",
-            max_remote_calls=2,
-            max_remote_tokens=requirements["remote_tokens_conservative"],
-            max_rpm=100000,
-            max_output_tokens_per_call=768,
-            seed=paired.DEFAULT_SEED,
-            timeout_seconds=1,
-            post_json=transport,
-            sleeper=lambda _: None,
-        )
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = Path(temporary) / "ledger.json"
+            records = paired.run_execution(
+                self.units,
+                gemini_model=paired.DEFAULT_MODEL,
+                local_model="local-hybrid-v1.1.0",
+                gemini_key="dummy-secret-not-logged",
+                local_base_url="http://127.0.0.1:8090",
+                local_token="local-secret",
+                max_remote_calls=2,
+                max_remote_tokens=requirements["remote_tokens_conservative"],
+                max_rpm=100000,
+                max_tpm=1000000,
+                max_remote_rpd=2,
+                remote_attempt_ledger=ledger,
+                plan_sha256="b" * 64,
+                max_output_tokens_per_call=768,
+                seed=paired.DEFAULT_SEED,
+                timeout_seconds=1,
+                post_json=transport,
+                sleeper=lambda _: None,
+            )
+            ledger_payload = json.loads(ledger.read_text(encoding="utf-8"))
+            self.assertEqual(len(ledger_payload["attempts"]), 2)
+            self.assertTrue(
+                all(item["status"] == "COMPLETED" for item in ledger_payload["attempts"])
+            )
         remote_calls = [item for item in calls if "googleapis.com" in item[0]]
         self.assertEqual(len(remote_calls), 2)
         self.assertTrue(
@@ -287,15 +441,318 @@ class PairedBenchmarkExecutionGuardsTests(unittest.TestCase):
             )
         )
         self.assertEqual(len(records), 4)
+        remote_records = [
+            row for row in records if row["provider"] == paired.REMOTE_PROVIDER
+        ]
+        self.assertTrue(
+            all(row.get("remote_quota_control", {}).get("effective_tpm") == 1000000 for row in remote_records)
+        )
         serialized = json.dumps(records)
         self.assertNotIn("dummy-secret-not-logged", serialized)
         self.assertNotIn("local-secret", serialized)
+
+    def test_invalid_local_preflight_blocks_every_gemini_call(self) -> None:
+        calls: list[str] = []
+
+        def transport(url: str, headers: dict, payload: dict, timeout: float) -> tuple[int, dict]:
+            calls.append(url)
+            if "127.0.0.1" in url:
+                return 401, {"error": {"message": "token local inválido"}}
+            return 200, {}
+
+        requirements = paired.budget_requirements(self.units)
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = Path(temporary) / "ledger.json"
+            with self.assertRaisesRegex(
+                paired.BenchmarkExecutionAborted, "Pré-flight LOCAL falhou"
+            ) as captured:
+                paired.run_execution(
+                    self.units,
+                    gemini_model=paired.DEFAULT_MODEL,
+                    local_model="local-hybrid-v1.8.0",
+                    gemini_key="dummy-secret",
+                    local_base_url="http://127.0.0.1:8090",
+                    local_token="wrong-local-token",
+                    max_remote_calls=2,
+                    max_remote_tokens=requirements["remote_tokens_conservative"],
+                    max_rpm=4,
+                    max_tpm=1000000,
+                    max_remote_rpd=2,
+                    remote_attempt_ledger=ledger,
+                    plan_sha256="c" * 64,
+                    max_output_tokens_per_call=768,
+                    seed=paired.DEFAULT_SEED,
+                    timeout_seconds=1,
+                    post_json=transport,
+                    sleeper=lambda _: None,
+                )
+            self.assertEqual(captured.exception.phase, "LOCAL_PREFLIGHT")
+            self.assertEqual(len(captured.exception.records), len(self.units))
+            self.assertFalse(any("googleapis.com" in url for url in calls))
+            self.assertFalse(ledger.exists())
+
+    def test_remote_ledger_counts_started_attempts_and_enforces_rolling_cap(self) -> None:
+        now = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = Path(temporary) / "ledger.json"
+            first = paired.reserve_remote_attempt(
+                ledger,
+                max_remote_rpd=2,
+                model=paired.DEFAULT_MODEL,
+                unit_id="PAIR-1",
+                plan_sha256="d" * 64,
+                now=now,
+            )
+            paired.complete_remote_attempt(
+                ledger,
+                first,
+                http_status=200,
+                error_code=None,
+                now=now + timedelta(seconds=1),
+            )
+            paired.reserve_remote_attempt(
+                ledger,
+                max_remote_rpd=2,
+                model=paired.DEFAULT_MODEL,
+                unit_id="PAIR-2",
+                plan_sha256="d" * 64,
+                now=now + timedelta(seconds=2),
+            )
+            with self.assertRaisesRegex(
+                paired.BenchmarkGuardError, "(?i)limite conservador"
+            ):
+                paired.reserve_remote_attempt(
+                    ledger,
+                    max_remote_rpd=2,
+                    model=paired.DEFAULT_MODEL,
+                    unit_id="PAIR-3",
+                    plan_sha256="d" * 64,
+                    now=now + timedelta(seconds=3),
+                )
+            payload = json.loads(ledger.read_text(encoding="utf-8"))
+            self.assertEqual(len(payload["attempts"]), 2)
+            self.assertEqual(payload["attempts"][0]["status"], "COMPLETED")
+            self.assertEqual(
+                payload["attempts"][1]["status"], "STARTED_CONSERVATIVE_COUNT"
+            )
+
+    def test_first_429_aborts_without_attempting_remaining_units(self) -> None:
+        calls: list[str] = []
+
+        def transport(url: str, headers: dict, payload: dict, timeout: float) -> tuple[int, dict]:
+            calls.append(url)
+            if "127.0.0.1" in url and "/classify" in url:
+                return 200, {
+                    "result": {
+                        "tipo": "MANUTENCAO",
+                        "executor": "DEMO",
+                        "confianca": 0.99,
+                    },
+                    "metadata": {"pipeline_evaluation_eligible": True},
+                }
+            if "127.0.0.1" in url and "/deduplicate" in url:
+                return 200, {
+                    "result": {
+                        "eh_duplicado": False,
+                        "chamado_referencia_id": None,
+                        "confianca": 0.99,
+                        "probabilidades": {"duplicado": 0.01, "nao_duplicado": 0.99},
+                    },
+                    "metadata": {"pipeline_evaluation_eligible": True},
+                }
+            return 429, {
+                "error": {
+                    "status": "RESOURCE_EXHAUSTED",
+                    "message": "quota exceeded",
+                }
+            }
+
+        requirements = paired.budget_requirements(self.units)
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = Path(temporary) / "ledger.json"
+            with self.assertRaisesRegex(
+                paired.BenchmarkExecutionAborted, "HTTP 429"
+            ) as captured:
+                paired.run_execution(
+                    self.units,
+                    gemini_model=paired.DEFAULT_MODEL,
+                    local_model="local-hybrid-v1.8.0",
+                    gemini_key="dummy-secret",
+                    local_base_url="http://127.0.0.1:8090",
+                    local_token="local-token",
+                    max_remote_calls=2,
+                    max_remote_tokens=requirements["remote_tokens_conservative"],
+                    max_rpm=4,
+                    max_tpm=1000000,
+                    max_remote_rpd=2,
+                    remote_attempt_ledger=ledger,
+                    plan_sha256="e" * 64,
+                    max_output_tokens_per_call=768,
+                    seed=paired.DEFAULT_SEED,
+                    timeout_seconds=1,
+                    post_json=transport,
+                    sleeper=lambda _: None,
+                )
+            self.assertEqual(captured.exception.phase, "REMOTE_HTTP_429")
+            self.assertEqual(len(captured.exception.records), len(self.units) + 1)
+            remote_calls = [url for url in calls if "googleapis.com" in url]
+            self.assertEqual(len(remote_calls), 1)
+            payload = json.loads(ledger.read_text(encoding="utf-8"))
+            self.assertEqual(len(payload["attempts"]), 1)
+            self.assertEqual(payload["attempts"][0]["http_status"], 429)
+
+    def test_first_transport_error_aborts_without_waiting_for_remaining_units(self) -> None:
+        calls: list[str] = []
+
+        def transport(url: str, headers: dict, payload: dict, timeout: float) -> tuple[int, dict]:
+            calls.append(url)
+            if "127.0.0.1" in url and "/classify" in url:
+                return 200, {
+                    "result": {
+                        "tipo": "MANUTENCAO",
+                        "executor": "DEMO",
+                        "confianca": 0.99,
+                    },
+                    "metadata": {"pipeline_evaluation_eligible": True},
+                }
+            if "127.0.0.1" in url and "/deduplicate" in url:
+                return 200, {
+                    "result": {
+                        "eh_duplicado": False,
+                        "chamado_referencia_id": None,
+                        "confianca": 0.99,
+                        "probabilidades": {"duplicado": 0.01, "nao_duplicado": 0.99},
+                    },
+                    "metadata": {"pipeline_evaluation_eligible": True},
+                }
+            return 0, {
+                "error": {
+                    "status": "TRANSPORT_ERROR",
+                    "message": "socket blocked",
+                }
+            }
+
+        requirements = paired.budget_requirements(self.units)
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = Path(temporary) / "ledger.json"
+            with self.assertRaisesRegex(
+                paired.BenchmarkExecutionAborted, "Falha de transporte"
+            ) as captured:
+                paired.run_execution(
+                    self.units,
+                    gemini_model=paired.DEFAULT_MODEL,
+                    local_model="local-hybrid-v1.8.0",
+                    gemini_key="dummy-secret",
+                    local_base_url="http://127.0.0.1:8090",
+                    local_token="local-token",
+                    max_remote_calls=2,
+                    max_remote_tokens=requirements["remote_tokens_conservative"],
+                    max_rpm=4,
+                    max_tpm=1000000,
+                    max_remote_rpd=2,
+                    remote_attempt_ledger=ledger,
+                    plan_sha256="f" * 64,
+                    max_output_tokens_per_call=768,
+                    seed=paired.DEFAULT_SEED,
+                    timeout_seconds=1,
+                    post_json=transport,
+                    sleeper=lambda _: None,
+                )
+            self.assertEqual(captured.exception.phase, "REMOTE_TRANSPORT_ERROR")
+            self.assertEqual(len(captured.exception.records), len(self.units) + 1)
+            self.assertEqual(
+                len([url for url in calls if "googleapis.com" in url]), 1
+            )
+            payload = json.loads(ledger.read_text(encoding="utf-8"))
+            self.assertEqual(len(payload["attempts"]), 1)
+            self.assertEqual(payload["attempts"][0]["http_status"], 0)
+
+    def test_first_non_429_http_or_contract_error_aborts_without_retry(self) -> None:
+        scenarios = (
+            (
+                401,
+                {"error": {"status": "UNAUTHENTICATED", "message": "invalid"}},
+                "REMOTE_HTTP_ERROR",
+            ),
+            (
+                200,
+                {"candidates": [{"content": {"parts": [{"text": "{}"}]}}]},
+                "REMOTE_CONTRACT_ERROR",
+            ),
+        )
+        requirements = paired.budget_requirements(self.units)
+        for remote_status, remote_body, expected_phase in scenarios:
+            with self.subTest(expected_phase=expected_phase):
+                calls: list[str] = []
+
+                def transport(
+                    url: str, headers: dict, payload: dict, timeout: float
+                ) -> tuple[int, dict]:
+                    calls.append(url)
+                    if "127.0.0.1" in url and "/classify" in url:
+                        return 200, {
+                            "result": {
+                                "tipo": "MANUTENCAO",
+                                "executor": "DEMO",
+                                "confianca": 0.99,
+                            },
+                            "metadata": {"pipeline_evaluation_eligible": True},
+                        }
+                    if "127.0.0.1" in url and "/deduplicate" in url:
+                        return 200, {
+                            "result": {
+                                "eh_duplicado": False,
+                                "chamado_referencia_id": None,
+                                "confianca": 0.99,
+                                "probabilidades": {
+                                    "duplicado": 0.01,
+                                    "nao_duplicado": 0.99,
+                                },
+                            },
+                            "metadata": {"pipeline_evaluation_eligible": True},
+                        }
+                    return remote_status, remote_body
+
+                with tempfile.TemporaryDirectory() as temporary:
+                    with self.assertRaises(paired.BenchmarkExecutionAborted) as captured:
+                        paired.run_execution(
+                            self.units,
+                            gemini_model=paired.DEFAULT_MODEL,
+                            local_model="local-hybrid-v1.8.0",
+                            gemini_key="dummy-secret",
+                            local_base_url="http://127.0.0.1:8090",
+                            local_token="local-token",
+                            max_remote_calls=2,
+                            max_remote_tokens=requirements[
+                                "remote_tokens_conservative"
+                            ],
+                            max_rpm=100000,
+                            max_tpm=1000000,
+                            max_remote_rpd=2,
+                            remote_attempt_ledger=Path(temporary) / "ledger.json",
+                            plan_sha256="1" * 64,
+                            max_output_tokens_per_call=768,
+                            seed=paired.DEFAULT_SEED,
+                            timeout_seconds=1,
+                            post_json=transport,
+                            sleeper=lambda _: None,
+                        )
+                    self.assertEqual(captured.exception.phase, expected_phase)
+                    self.assertEqual(
+                        len([url for url in calls if "googleapis.com" in url]), 1
+                    )
 
     def test_secret_redaction_covers_google_key_shape(self) -> None:
         key = "AIza" + "A" * 32
         value = paired.redact(f"falha key={key}", [key])
         self.assertNotIn(key, value)
         self.assertIn("REDACTED", value)
+
+    def test_secret_redaction_covers_openai_compatible_key_shape(self) -> None:
+        key = "sk-" + "a" * 32
+        value = paired.redact(f"falha key={key}", [])
+        self.assertNotIn(key, value)
+        self.assertIn("REDACTED_API_KEY", value)
 
     def test_duplicate_with_wrong_candidate_is_not_scored_correct(self) -> None:
         rows = paired.load_jsonl(paired.DEFAULT_DATASET)
@@ -535,6 +992,7 @@ class PairedBenchmarkExecutionGuardsTests(unittest.TestCase):
                 {**base, "provider": paired.REMOTE_PROVIDER, "ok": False},
             ],
             plan,
+            expected_unit_ids=["PAIR-INVALID"],
         )
         pair = summary["paired"]
         self.assertEqual(pair["attempted_pairs"], 1)
@@ -545,7 +1003,7 @@ class PairedBenchmarkExecutionGuardsTests(unittest.TestCase):
         self.assertFalse(pair["mcnemar_evaluable"])
         self.assertEqual(summary["status"], "REJECTED_NO_JOINTLY_VALID_PAIRS")
 
-    def test_paired_summary_computes_mcnemar_only_on_jointly_valid_pairs(self) -> None:
+    def test_partial_pairs_are_descriptive_and_block_inference(self) -> None:
         plan = {
             "manifest_payload_sha256": "b" * 64,
             "remote": {"budget": {}},
@@ -575,6 +1033,7 @@ class PairedBenchmarkExecutionGuardsTests(unittest.TestCase):
                 record("PAIR-PARTIAL", paired.REMOTE_PROVIDER, False),
             ],
             plan,
+            expected_unit_ids=["PAIR-VALID", "PAIR-PARTIAL"],
         )
         pair = summary["paired"]
         self.assertEqual(pair["attempted_pairs"], 2)
@@ -582,9 +1041,454 @@ class PairedBenchmarkExecutionGuardsTests(unittest.TestCase):
         self.assertEqual(pair["complete_pairs"], 1)
         self.assertEqual(pair["both_correct"], 1)
         self.assertEqual(pair["both_not_correct"], 0)
-        self.assertEqual(pair["mcnemar_exact_two_sided_p"], 1.0)
-        self.assertTrue(pair["mcnemar_evaluable"])
-        self.assertEqual(summary["status"], "PARTIAL_VALID_PAIRS_NON_CONFIRMATORY")
+        self.assertIsNone(pair["mcnemar_exact_two_sided_p"])
+        self.assertFalse(pair["mcnemar_evaluable"])
+        self.assertEqual(
+            pair["complete_case_point_estimate"]["estimate"], 0.0
+        )
+        self.assertTrue(pair["complete_case_point_estimate"]["descriptive_only"])
+        self.assertEqual(
+            summary["status"], "REJECTED_INCOMPLETE_OR_INVALID_PAIRS"
+        )
+        self.assertFalse(summary["noninferiority"]["evaluated"])
+        self.assertEqual(
+            summary["noninferiority"]["reason"], "PAIR_VALIDITY_GATE_FAILED"
+        )
+        composite = summary["conservative_availability_accuracy_composite"]
+        self.assertEqual(composite["local_accuracy"], 1.0)
+        self.assertEqual(composite["gemini_accuracy"], 0.5)
+        self.assertEqual(composite["difference_local_minus_gemini"], 0.5)
+        self.assertFalse(composite["noninferiority_decision_allowed"])
+
+    def test_complete_verified_pairs_allow_paired_test_but_not_critical_h2(self) -> None:
+        plan = {
+            "manifest_payload_sha256": "c" * 64,
+            "sample": {"units": 1},
+            "paired_design": {"seed": paired.DEFAULT_SEED},
+            "remote": {"budget": {}},
+            "noninferiority": {
+                "margin_local_minus_gemini": 0.05,
+                "confidence": 0.95,
+            },
+        }
+        base = {
+            "unit_id": "PAIR-COMPLETE",
+            "task": "classification",
+            "ok": True,
+            "decision": "DEMO",
+            "predicted_class": "DEMO",
+            "operational_abstention": False,
+            "routed_to_human": False,
+            "gold": {"decision": "DEMO"},
+            "reference_id": None,
+            "latency_ms": 1.0,
+            "usage": None,
+        }
+        summary = paired.summarize(
+            [
+                {**base, "provider": paired.LOCAL_PROVIDER},
+                {**base, "provider": paired.REMOTE_PROVIDER},
+            ],
+            plan,
+            expected_unit_ids=["PAIR-COMPLETE"],
+        )
+        self.assertTrue(summary["stability"]["all_planned_pairs_present_and_valid"])
+        self.assertTrue(summary["paired"]["mcnemar_evaluable"])
+        self.assertTrue(summary["noninferiority"]["evaluated"])
+        self.assertEqual(
+            summary["noninferiority"]["estimand"],
+            "overall_accuracy_local_minus_accuracy_gemini",
+        )
+        self.assertFalse(summary["noninferiority"]["critical_risk_h2_evaluated"])
+
+    def test_missing_remote_record_blocks_noninferiority(self) -> None:
+        plan = {
+            "manifest_payload_sha256": "d" * 64,
+            "sample": {"units": 1},
+            "paired_design": {"seed": paired.DEFAULT_SEED},
+            "remote": {"budget": {}},
+            "noninferiority": {
+                "margin_local_minus_gemini": 0.10,
+                "confidence": 0.95,
+            },
+        }
+        local = {
+            "unit_id": "PAIR-MISSING-REMOTE",
+            "provider": paired.LOCAL_PROVIDER,
+            "task": "classification",
+            "ok": True,
+            "decision": "DEMO",
+            "predicted_class": "DEMO",
+            "operational_abstention": False,
+            "routed_to_human": False,
+            "gold": {"decision": "DEMO"},
+            "reference_id": None,
+            "latency_ms": 1.0,
+            "usage": None,
+        }
+        summary = paired.summarize(
+            [local],
+            plan,
+            expected_unit_ids=["PAIR-MISSING-REMOTE"],
+        )
+        self.assertEqual(summary["stability"]["remote"]["missing_records"], 1)
+        self.assertFalse(summary["noninferiority"]["evaluated"])
+        self.assertIsNone(summary["noninferiority"]["noninferior"])
+
+    def test_development_pilot_never_evaluates_noninferiority(self) -> None:
+        result = paired.paired_noninferiority(
+            [0] * 40,
+            {"margin_local_minus_gemini": 0.05, "confidence": 0.95},
+            seed=paired.DEFAULT_SEED,
+            descriptive_pilot=True,
+        )
+        self.assertFalse(result["evaluated"])
+        self.assertEqual(result["reason"], "DESCRIPTIVE_DEVELOPMENT_PILOT_ONLY")
+        self.assertIsNone(result["noninferior"])
+
+    def test_complete_development_pilot_suppresses_inferential_tests(self) -> None:
+        plan = {
+            "manifest_payload_sha256": "e" * 64,
+            "sample": {"units": 1},
+            "paired_design": {
+                "seed": paired.DEFAULT_SEED,
+                "analysis_intent": "DESCRIPTIVE_DEVELOPMENT_PILOT",
+            },
+            "dataset": {"split": "DESENVOLVIMENTO"},
+            "remote": {"budget": {}},
+            "noninferiority": {
+                "margin_local_minus_gemini": None,
+                "confidence": 0.95,
+            },
+        }
+        base = {
+            "unit_id": "PILOT-1",
+            "task": "classification",
+            "ok": True,
+            "decision": "DEMO",
+            "predicted_class": "DEMO",
+            "operational_abstention": False,
+            "routed_to_human": False,
+            "gold": {"decision": "DEMO"},
+            "reference_id": None,
+            "latency_ms": 1.0,
+            "usage": None,
+        }
+        summary = paired.summarize(
+            [
+                {**base, "provider": paired.LOCAL_PROVIDER},
+                {**base, "provider": paired.REMOTE_PROVIDER},
+            ],
+            plan,
+            expected_unit_ids=["PILOT-1"],
+        )
+        self.assertEqual(summary["status"], "DESCRIPTIVE_PILOT_COMPLETE")
+        self.assertIsNone(summary["paired"]["mcnemar_exact_two_sided_p"])
+        self.assertTrue(
+            summary["paired"]["mcnemar_suppressed_for_descriptive_pilot"]
+        )
+        self.assertFalse(summary["noninferiority"]["evaluated"])
+        self.assertEqual(
+            summary["noninferiority"]["reason"],
+            "DESCRIPTIVE_DEVELOPMENT_PILOT_ONLY",
+        )
+
+    def test_development_cli_rejects_noninferiority_margin(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "exclusivamente descritivo"):
+            paired.main(
+                [
+                    "--development-paired",
+                    "--max-remote-calls",
+                    "40",
+                    "--max-remote-tokens",
+                    "500000",
+                    "--max-rpm",
+                    "4",
+                    "--max-tpm",
+                    "250000",
+                    "--max-remote-rpd",
+                    "40",
+                    "--noninferiority-margin",
+                    "0.05",
+                ]
+            )
+
+    def test_noninferiority_is_not_evaluated_without_explicit_margin(self) -> None:
+        result = paired.paired_noninferiority(
+            [0, 0, 1], None, seed=paired.DEFAULT_SEED
+        )
+        self.assertFalse(result["evaluated"])
+        self.assertEqual(result["reason"], "MARGIN_NOT_PRE_REGISTERED")
+
+    def test_noninferiority_uses_non_degenerate_paired_bound_when_margin_is_frozen(self) -> None:
+        result = paired.paired_noninferiority(
+            [0] * 40,
+            {
+                "margin_local_minus_gemini": 0.05,
+                "confidence": 0.95,
+            },
+            seed=paired.DEFAULT_SEED,
+        )
+        self.assertTrue(result["evaluated"])
+        self.assertEqual(result["estimate"], 0.0)
+        self.assertLess(result["confidence_lower_bound_95_one_sided"], 0.0)
+        self.assertFalse(result["noninferior"])
+
+    def test_critical_risks_are_paired_and_descriptive_only(self) -> None:
+        plan = {
+            "manifest_payload_sha256": "f" * 64,
+            "sample": {
+                "units": 4,
+                "label_counts": {
+                    "deduplication:DUPLICADO": 2,
+                    "classification:DEMO": 1,
+                    "classification:SOB_DEMANDA": 1,
+                },
+            },
+            "paired_design": {
+                "seed": paired.DEFAULT_SEED,
+                "analysis_intent": "DESCRIPTIVE_DEVELOPMENT_PILOT",
+            },
+            "dataset": {"split": "DESENVOLVIMENTO"},
+            "remote": {"budget": {}},
+            "noninferiority": {"margin_local_minus_gemini": None},
+        }
+
+        def record(
+            unit_id: str,
+            provider: str,
+            *,
+            task: str,
+            gold: str,
+            decision: str,
+            routed_to_human: bool,
+            predicted_class: str | None = None,
+            abstained: bool = False,
+            reference_id: int | None = None,
+            gold_reference_id: int | None = None,
+        ) -> dict[str, object]:
+            return {
+                "unit_id": unit_id,
+                "provider": provider,
+                "task": task,
+                "ok": True,
+                "decision": decision,
+                "predicted_class": predicted_class,
+                "operational_abstention": abstained,
+                "abstained": abstained,
+                "routed_to_human": routed_to_human,
+                "gold": {
+                    "decision": gold,
+                    **(
+                        {"reference_id": gold_reference_id}
+                        if task == "deduplication"
+                        else {}
+                    ),
+                },
+                "reference_id": reference_id,
+                "shared_input_sha256": unit_id.lower().ljust(64, "0")[:64],
+                "latency_ms": 1.0,
+                "usage": None,
+            }
+
+        records = [
+            record(
+                "D1",
+                paired.LOCAL_PROVIDER,
+                task="deduplication",
+                gold="DUPLICADO",
+                decision="NAO_DUPLICADO",
+                routed_to_human=False,
+                gold_reference_id=7,
+            ),
+            record(
+                "D1",
+                paired.REMOTE_PROVIDER,
+                task="deduplication",
+                gold="DUPLICADO",
+                decision="DUPLICADO",
+                routed_to_human=True,
+                reference_id=7,
+                gold_reference_id=7,
+            ),
+            record(
+                "D2",
+                paired.LOCAL_PROVIDER,
+                task="deduplication",
+                gold="DUPLICADO",
+                decision="TRIAGEM_MANUAL",
+                routed_to_human=True,
+                abstained=True,
+                gold_reference_id=8,
+            ),
+            record(
+                "D2",
+                paired.REMOTE_PROVIDER,
+                task="deduplication",
+                gold="DUPLICADO",
+                decision="NAO_DUPLICADO",
+                routed_to_human=False,
+                gold_reference_id=8,
+            ),
+            record(
+                "C1",
+                paired.LOCAL_PROVIDER,
+                task="classification",
+                gold="DEMO",
+                decision="OBRA",
+                predicted_class="OBRA",
+                routed_to_human=False,
+            ),
+            record(
+                "C1",
+                paired.REMOTE_PROVIDER,
+                task="classification",
+                gold="DEMO",
+                decision="DEMO",
+                predicted_class="DEMO",
+                routed_to_human=False,
+            ),
+            record(
+                "C2",
+                paired.LOCAL_PROVIDER,
+                task="classification",
+                gold="SOB_DEMANDA",
+                decision="TRIAGEM_MANUAL",
+                predicted_class="TRIAGEM_MANUAL",
+                routed_to_human=True,
+            ),
+            record(
+                "C2",
+                paired.REMOTE_PROVIDER,
+                task="classification",
+                gold="SOB_DEMANDA",
+                decision="OBRA",
+                predicted_class="OBRA",
+                routed_to_human=False,
+            ),
+        ]
+        summary = paired.summarize(
+            records,
+            plan,
+            expected_unit_ids=["D1", "D2", "C1", "C2"],
+        )
+        critical = summary["critical_risk_strata"]
+        self.assertEqual(
+            critical["analysis_type"],
+            "PAIRED_DESCRIPTIVE_CRITICAL_RISK_STRATIFICATION",
+        )
+        self.assertFalse(critical["inferential_test_performed"])
+        self.assertFalse(critical["noninferiority_evaluated"])
+        self.assertIsNone(critical["noninferiority_margin"])
+
+        dedup = critical["strata"]["automatic_dedup_false_negative"]
+        self.assertEqual(dedup["planned_opportunity_units_from_frozen_plan"], 2)
+        self.assertEqual(dedup["observable_paired_units"], 2)
+        self.assertEqual(dedup["local"]["event_count"], 1)
+        self.assertEqual(dedup["gemini"]["event_count"], 1)
+        self.assertEqual(dedup["risk_difference_local_minus_gemini"], 0.0)
+        self.assertEqual(dedup["paired_event_table"]["local_only_event"], 1)
+        self.assertEqual(dedup["paired_event_table"]["gemini_only_event"], 1)
+
+        classification = critical["strata"]["automatic_maintenance_as_obra"]
+        self.assertEqual(
+            classification["planned_opportunity_units_from_frozen_plan"], 2
+        )
+        self.assertEqual(classification["observable_paired_units"], 2)
+        self.assertEqual(classification["local"]["event_rate"], 0.5)
+        self.assertEqual(classification["gemini"]["event_rate"], 0.5)
+        self.assertFalse(classification["mcnemar_evaluated"])
+        self.assertTrue(
+            classification["zero_observed_events_does_not_imply_zero_risk"]
+        )
+
+    def test_critical_risk_does_not_treat_missing_pair_as_safe(self) -> None:
+        plan = {
+            "manifest_payload_sha256": "a" * 64,
+            "sample": {
+                "units": 1,
+                "label_counts": {"deduplication:DUPLICADO": 1},
+            },
+            "paired_design": {"seed": paired.DEFAULT_SEED},
+            "remote": {"budget": {}},
+            "noninferiority": {"margin_local_minus_gemini": None},
+        }
+        local = {
+            "unit_id": "D-MISSING",
+            "provider": paired.LOCAL_PROVIDER,
+            "task": "deduplication",
+            "ok": True,
+            "decision": "NAO_DUPLICADO",
+            "operational_abstention": False,
+            "routed_to_human": False,
+            "gold": {"decision": "DUPLICADO", "reference_id": 2},
+            "reference_id": None,
+            "latency_ms": 1.0,
+            "usage": None,
+        }
+        summary = paired.summarize(
+            [local], plan, expected_unit_ids=["D-MISSING"]
+        )
+        stratum = summary["critical_risk_strata"]["strata"][
+            "automatic_dedup_false_negative"
+        ]
+        self.assertEqual(stratum["identified_opportunity_units_from_records"], 1)
+        self.assertEqual(stratum["observable_paired_units"], 0)
+        self.assertFalse(stratum["all_planned_opportunity_units_observable"])
+        self.assertEqual(stratum["invalid_or_incomplete_opportunity_pairs"], 1)
+        self.assertIsNone(stratum["local"]["event_rate"])
+        self.assertIsNone(stratum["risk_difference_local_minus_gemini"])
+
+    def test_pair_contract_mismatch_blocks_all_paired_inference(self) -> None:
+        plan = {
+            "manifest_payload_sha256": "b" * 64,
+            "sample": {"units": 1},
+            "paired_design": {"seed": paired.DEFAULT_SEED},
+            "remote": {"budget": {}},
+            "noninferiority": {
+                "margin_local_minus_gemini": 0.05,
+                "confidence": 0.95,
+            },
+        }
+        base = {
+            "unit_id": "PAIR-MISMATCH",
+            "task": "classification",
+            "ok": True,
+            "decision": "DEMO",
+            "predicted_class": "DEMO",
+            "operational_abstention": False,
+            "routed_to_human": False,
+            "reference_id": None,
+            "latency_ms": 1.0,
+            "usage": None,
+        }
+        summary = paired.summarize(
+            [
+                {
+                    **base,
+                    "provider": paired.LOCAL_PROVIDER,
+                    "gold": {"decision": "DEMO"},
+                },
+                {
+                    **base,
+                    "provider": paired.REMOTE_PROVIDER,
+                    "gold": {"decision": "SOB_DEMANDA"},
+                },
+            ],
+            plan,
+            expected_unit_ids=["PAIR-MISMATCH"],
+        )
+        self.assertFalse(summary["stability"]["all_planned_pairs_present_and_valid"])
+        self.assertEqual(summary["stability"]["pair_contract_mismatch_count"], 1)
+        self.assertIn(
+            "PAIR_TASK_GOLD_OR_INPUT_HASH_MISMATCH",
+            summary["stability"]["validity_blockers"],
+        )
+        self.assertEqual(summary["paired"]["jointly_valid_pairs"], 0)
+        self.assertFalse(summary["noninferiority"]["evaluated"])
+        composite = summary["conservative_availability_accuracy_composite"]
+        self.assertEqual(composite["local_accuracy"], 0.0)
+        self.assertEqual(composite["gemini_accuracy"], 0.0)
 
 
 class LocalOnlyBenchmarkTests(unittest.TestCase):
@@ -695,6 +1599,43 @@ class LocalOnlyBenchmarkTests(unittest.TestCase):
         self.assertEqual(dedup["decision"], "TRIAGEM_MANUAL")
         self.assertEqual(dedup["decision_path"], "MODEL_ABSTENTION")
         self.assertNotIn("local-secret", json.dumps(records))
+
+    def test_local_execution_requires_token_and_stops_on_first_invalid_response(self) -> None:
+        units = paired.build_local_only_units(
+            self.rows,
+            realizations_per_core=1,
+            classification_core_limit=4,
+            dedup_core_limit=2,
+        )[:2]
+        with self.assertRaisesRegex(paired.BenchmarkGuardError, "Credencial"):
+            paired.run_local_only_execution(
+                units,
+                local_model="fixture",
+                local_base_url="http://127.0.0.1:8090",
+                local_token="",
+                timeout_seconds=1,
+                post_json=lambda *_: (200, {}),
+            )
+
+        calls = 0
+
+        def invalid_transport(*_: object) -> tuple[int, dict]:
+            nonlocal calls
+            calls += 1
+            return 503, {"error": {"code": "LOCAL_BUSY", "message": "fixture"}}
+
+        with self.assertRaises(paired.BenchmarkExecutionAborted) as captured:
+            paired.run_local_only_execution(
+                units,
+                local_model="fixture",
+                local_base_url="http://127.0.0.1:8090",
+                local_token="secret",
+                timeout_seconds=1,
+                post_json=invalid_transport,
+            )
+        self.assertEqual(calls, 1)
+        self.assertEqual(len(captured.exception.records), 1)
+        self.assertEqual(captured.exception.phase, "LOCAL_ONLY_CONTRACT_ERROR")
 
     def test_local_summary_has_task_core_path_and_eligibility_strata(self) -> None:
         unit = paired.build_local_only_units(

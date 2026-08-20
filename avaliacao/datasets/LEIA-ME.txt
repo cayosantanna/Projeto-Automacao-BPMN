@@ -42,7 +42,7 @@ Seed naturalístico vigente:
 A contabilidade executável está em `../config/plano_seed_33x30.json`.
 
 Planejamento V4.1, ainda não materializado:
-- `docs/auditoria_amostral_v4.md` registra a expansão futura de 1.200 para cerca
+- `avaliacao/PRE_REGISTRO_PENDENTE.md` registra as condições inferenciais da expansão futura de 1.200 para cerca
   de 2.078 chamados;
 - o acréscimo correto é de 878 chamados derivados de 619 novos
   núcleos/episódios independentes;

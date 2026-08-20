@@ -47,6 +47,32 @@ class UpdateFailureSession:
 
 
 class TestDeployESegredos(unittest.TestCase):
+    def test_env_normalizer_prioritizes_n8n_env_and_is_idempotent(self):
+        source = (
+            "const one=(typeof process !== 'undefined' && process.env.FOO) || 'x';\n"
+            "const two=process.env.BAR;\n"
+            "const dynamic=(typeof process!=='undefined' && process.env[name]) || '';"
+        )
+        normalized = workflow_helpers.normalize_n8n_env_access(source)
+        self.assertIn(
+            "(typeof $env !== 'undefined' && $env.FOO) || "
+            "(typeof process !== 'undefined' && process.env.FOO)",
+            normalized,
+        )
+        self.assertIn(
+            "(typeof $env !== 'undefined' && $env.BAR) || "
+            "(typeof process !== 'undefined' && process.env.BAR)",
+            normalized,
+        )
+        self.assertIn(
+            "(typeof $env !== 'undefined' && $env[name]) || "
+            "(typeof process !== 'undefined' && process.env[name])",
+            normalized,
+        )
+        self.assertEqual(
+            workflow_helpers.normalize_n8n_env_access(normalized), normalized
+        )
+
     def test_recursive_sanitizer_converts_weak_glpi_fallbacks(self):
         workflow = {
             "headers": [
@@ -55,7 +81,8 @@ class TestDeployESegredos(unittest.TestCase):
             ],
             "code": (
                 "const appToken = String((typeof process !== 'undefined' && "
-                "process.env.GLPI_APP_TOKEN) || '');"
+                "process.env.GLPI_APP_TOKEN) || '');\n"
+                "const sessionToken = String($('GLPI: Sessão').first().json.session_token || '');"
             ),
         }
         workflow_helpers.sanitize_workflow_secrets(workflow)
@@ -64,6 +91,11 @@ class TestDeployESegredos(unittest.TestCase):
         self.assertIn("GLPI_AUTH_BASIC ausente", rendered)
         self.assertNotIn("={{ $env.GLPI_APP_TOKEN || '' }}", rendered)
         self.assertNotIn("={{ $env.GLPI_AUTH_BASIC || 'Basic ' }}", rendered)
+        self.assertIn("GLPI session_token ausente", rendered)
+        self.assertLess(
+            rendered.index("$env.GLPI_APP_TOKEN"),
+            rendered.index("process.env.GLPI_APP_TOKEN"),
+        )
 
     def test_public_bundle_has_no_predictable_credential(self):
         self.assertEqual(

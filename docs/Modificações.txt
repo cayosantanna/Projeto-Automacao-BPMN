@@ -1,0 +1,601 @@
+REGISTRO HISTÓRICO DE 02/07/2026. Este arquivo não descreve a configuração
+vigente. Atualmente, a sequência operacional é LOCAL (`local-hybrid-v1.8.0`)
+→ SECONDARY (`gemini-3.5-flash`); benchmarks congelam um único braço e desativam
+fallback. Consulte `estado_projeto_2026-08-17.md` antes de citar este snapshot.
+
+A infraestrutura de pesquisa e CI/CD está implementada e os seis workflows V9
+estão ativos. O n8n continua sendo o motor operacional: recebe chamados,
+controla a fila, consulta GLPI/PostgreSQL, chama o Gemini e aplica decisões. Os
+programas Python não processam chamados em produção; eles geram artefatos,
+validam consistência, executam o protocolo experimental, calculam métricas e
+automatizam o deploy.
+
+As principais entregas foram:
+
+- WF06 tornou-se o único ingresso público e passou a controlar a liberação
+  gradual para WF02/WF03;
+- filas receberam lock, lease, backoff, dead-letter e telemetria;
+- WF02/WF03 passaram a usar Gemini 3.5 Flash com JSON Schema canônico;
+- prompts, schemas, modelo, seed e hashes passaram a ser congelados;
+- datasets passaram a ser organizados em episódios isolados;
+- o piloto atual contém 50 tickets, 35 episódios e 94 decisões;
+- métricas probabilísticas e inferência estatística foram implementadas;
+- a conferência automática foi separada da revisão humana;
+- o benchmark foi bloqueado contra execução ou conclusão fora do protocolo;
+- builders, validação estática, backup e deploy formam um processo de CI/CD
+  reproduzível.
+
+Ainda não existe resultado científico final. Em 2 de julho de 2026 permanecem
+14 tickets operacionais na fila, sendo 11 pendentes e 3 liberados, e as 94
+decisões do piloto ainda não foram rotuladas pelos especialistas. Esses gates
+impedem corretamente a calibração e o benchmark.
+
+## 3. Separação entre operação, pesquisa e CI/CD
+
+### 3.1 Camada operacional
+
+A camada operacional é executada integralmente no n8n:
+
+- **WF01 – Sincronizador:** sincroniza o GLPI com o PostgreSQL e aplica retenção;
+- **WF02 – Triagem:** avalia duplicidade e prepara decisão fiscal;
+- **WF03 – Classificação:** classifica em OBRA, DEMO, SOB_DEMANDA,
+  DEMO_SEM_EQUIPE ou TRIAGEM_MANUAL;
+- **WF04 – Decisão Fiscal:** processa confirmação, rejeição e validade dos links;
+- **WF05 – Métricas:** consolida observabilidade e expõe apoio analítico;
+- **WF06 – Fila IA:** recebe o webhook público, persiste, reserva e libera
+  chamados para WF02/WF03.
+
+O fluxo operacional vigente é:
+
+**GLPI → WF06 → fila PostgreSQL → WF02 → WF03/WF04 → GLPI**
+
+### 3.2 Camada de pesquisa
+
+A camada de pesquisa é executada pelos scripts de `avaliacao/scripts` e não
+substitui o n8n. Ela é responsável por:
+
+- gerar datasets sintéticos e gabaritos;
+- criar tickets controlados no GLPI;
+- registrar `run_id`, `case_id` e `episode_id`;
+- conferir predições contra o gabarito;
+- exportar revisão cega para especialistas;
+- calcular métricas e intervalos de confiança;
+- calibrar vazão e limiar;
+- comparar Gemini, baselines e predições externas;
+- congelar as versões usadas no experimento.
+
+Essa separação foi adotada porque cálculos como bootstrap, McNemar, Cohen’s
+kappa, geração massiva de dados e validação de vazamento são mais auditáveis em
+scripts versionáveis do que em nós visuais. Isso não move a automação de
+produção para fora do n8n.
+
+### 3.3 Camada de CI/CD
+
+A camada de CI/CD transforma as definições versionadas em workflows implantados:
+
+1. os builders `build_wf01.py` a `build_wf06.py` geram os JSONs;
+2. prompts TXT e JSON Schemas são incorporados às chamadas de IA;
+3. hashes impedem alterações silenciosas nos snapshots;
+4. `sincronizar_manifesto.py` verifica modelo, prompts, schemas e opções;
+5. `validate_v9_static.py` valida estrutura, conexões, variáveis e schema SQL;
+6. o Docker Compose é validado antes do deploy;
+7. o deploy cria backup dos workflows publicados;
+8. os JSONs são enviados ao n8n e as versões retornadas são ativadas;
+9. o estado implantado é relido pela API REST para confirmar a publicação.
+
+## 4. Infraestrutura de pesquisa implementada
+
+### 4.1 Isolamento por episódios
+
+O dataset deixou de ser uma lista independente de tickets. Cada caso pertence a
+um episódio, identificado por `run_id/episode_id`. Isso é necessário porque a
+decisão de duplicidade depende da relação entre dois ou mais chamados.
+
+O WF02 restringe os candidatos de deduplicação ao mesmo episódio experimental.
+Assim, chamados de outros episódios, de execuções antigas ou da operação normal
+não podem contaminar a decisão.
+
+Piloto e teste possuem namespaces, seeds, IDs e famílias textuais diferentes. O
+validador recusa reutilização de ID ou texto normalizado entre splits.
+
+### 4.2 Dataset piloto
+
+O piloto V2 foi congelado com:
+
+- 50 tickets sintéticos;
+- 35 episódios;
+- 15 cenários de duplicidade;
+- 20 cenários exclusivamente classificatórios;
+- 94 decisões avaliáveis;
+- 6 duplicados esperados e 44 não duplicados;
+- 17 tickets marcados previamente para revisão humana;
+- SHA-256:
+  `54e3718ad8ab635ab4588a1bbdfbe54d9d39b2f558c0c996730889ab3da4555a`.
+
+Os cenários cobrem, entre outros pontos:
+
+- descrições detalhadas versus descrições vagas;
+- mesmo local com ativos diferentes;
+- mesmo solicitante com problemas distintos;
+- ar-condicionado com sintomas ou recorrências diferentes;
+- ausência de local exato;
+- obra versus manutenção em parede, rampa e telhado;
+- serviços DEMO versus SOB_DEMANDA;
+- demandas fora do escopo;
+- contradição, prompt injection, erros ortográficos e texto longo.
+
+### 4.3 Cobertura de DEMO sem equipe
+
+Foi criado o perfil operacional `DEMO_OFF`. Ele gera três cenários controlados
+(C02, C04 e C06) cujo resultado operacional esperado é
+`DEMO_SEM_EQUIPE`.
+
+O executor:
+
+- verifica se a fila operacional está vazia;
+- recria o n8n com `DEMO_EQUIPE_DISPONIVEL=false`;
+- executa os três casos;
+- restaura `DEMO_EQUIPE_DISPONIVEL=true` em bloco `finally`;
+- recusa a execução se houver risco de misturar casos operacionais e
+  experimentais.
+
+O gerador dos três casos foi testado. A execução ponta a ponta ainda não ocorreu
+porque a fila possui 14 itens operacionais.
+
+### 4.4 Modelo, prompts e saída estruturada
+
+O modelo congelado é `gemini-3.5-flash`.
+
+WF02 e WF03 usam nós HTTP Request dentro do próprio n8n para chamar
+`generateContent`. Cada chamada usa:
+
+- uma candidata;
+- limite de 4.096 tokens;
+- `responseMimeType=application/json`;
+- `responseJsonSchema` específico para a tarefa;
+- seed configurável por `IA_GENERATION_SEED`;
+- amostragem e nível de pensamento no padrão do provedor.
+
+Existem schemas separados para deduplicação e classificação. Mesmo com saída
+estruturada, os normalizadores continuam verificando:
+
+- presença de campos obrigatórios;
+- enumerações permitidas;
+- faixa e soma das probabilidades;
+- referência válida do chamado duplicado;
+- consistência entre tipo, executor e classe;
+- resposta bruta do provedor.
+
+Foram executadas chamadas reais para os dois schemas. Ambas retornaram JSON
+válido com os campos obrigatórios e `finishReason=STOP`.
+
+### 4.5 Gabarito e revisão humana
+
+O gabarito sintético é tratado como hipótese inicial, não como verdade absoluta.
+O protocolo exige:
+
+- dois especialistas rotulando independentemente e de forma cega;
+- registro anonimizado de perfil e experiência;
+- Cohen’s kappa antes da adjudicação;
+- terceiro especialista para divergências;
+- congelamento do gabarito adjudicado antes do benchmark.
+
+No benchmark, a conferência automática compara a saída com o gabarito
+adjudicado. Depois, uma auditoria humana estratificada verifica uma amostra
+segundo cenário, risco, dificuldade e tipo de erro.
+
+O sistema não permite concluir o benchmark sem registrar essa auditoria.
+
+### 4.6 Métricas implementadas
+
+Para duplicidade:
+
+- TP, FP, FN e TN;
+- precisão, recall, especificidade e F1;
+- acurácia da referência duplicada;
+- ROC-AUC e Average Precision;
+- Log Loss e Brier Score.
+
+Para classificação:
+
+- matriz de confusão absoluta e normalizada;
+- precisão, recall e F1 por classe;
+- acurácia e F1 macro;
+- ROC-AUC/AP um-contra-todos;
+- Log Loss e Brier Score;
+- taxa de TRIAGEM_MANUAL;
+- curva risco-cobertura.
+
+Para desempenho:
+
+- média, p50, p95 e p99 de latência;
+- throughput;
+- tempo de espera na fila;
+- taxa de falha, timeout e rate limit;
+- ordem de processamento;
+- reservas expiradas e dead-letter.
+
+Para inferência:
+
+- bootstrap de 95% com reamostragem por episódio;
+- Wilson 95% para proporções;
+- McNemar exato para comparações pareadas;
+- Cohen’s kappa para concordância entre especialistas.
+
+Probabilidades ausentes ou inválidas não são reconstruídas a partir do
+gabarito, pois isso inflaria artificialmente ROC-AUC, Log Loss e Brier.
+
+### 4.7 Planejamento amostral
+
+O planejamento conservador exige suporte mínimo de 97 observações por classe.
+Como OBRA possui três casos por variação, ela é a classe limitante.
+
+Foi definido:
+
+- 33 variações;
+- 1.650 tickets;
+- 1.155 episódios;
+- pelo menos 155 pares para a aproximação de poder do McNemar;
+- 2.000 reamostragens bootstrap por padrão.
+
+Esses valores são planejamento, não garantia antecipada de poder ou precisão.
+Os intervalos obtidos no benchmark continuam sendo necessários.
+
+## 5. Controle de fila e calibração de desempenho
+
+O WF06 foi criado porque não é realista assumir que os chamados sempre chegarão
+em pequenos lotes com intervalos fixos. Ele permite testar carga concorrente sem
+enviar tudo diretamente ao Gemini.
+
+Os controles implementados são:
+
+- lock consultivo PostgreSQL para serializar agendadores concorrentes;
+- `FOR UPDATE SKIP LOCKED` para reservar itens sem colisão;
+- lease para recuperar processamento interrompido;
+- backoff exponencial;
+- jitter determinístico;
+- disponibilidade futura para retentativas;
+- dead-letter após esgotar tentativas;
+- telemetria de reserva, liberação e espera.
+
+Na calibração, cada tratamento mantém lote e intervalo fixos. Um algoritmo
+adaptativo alteraria a variável independente durante o teste e, por isso, só
+poderia ser avaliado em outro experimento.
+
+O calibrador randomiza a ordem das configurações e inclui:
+
+- no mínimo três repetições;
+- warm-up separado das latências;
+- ingresso concorrente;
+- p50, p95 e p99;
+- rejeição automática se houver rate limit, erro, timeout, probabilidade
+  inválida, inversão ou falha de lease.
+
+## 6. Calibração do limiar de confiança
+
+O valor atual `IA_CONFIANCA_MINIMA=0.65` é operacional e provisório. Ele não
+pode ser apresentado no artigo como valor ótimo.
+
+Foi decidido que o próximo piloto deve executar com limiar 0,50. Depois da
+adjudicação, o calibrador avalia pontos de 0,50 a 0,95, em passos de 0,05.
+
+Os critérios são definidos antes de observar o resultado:
+
+- risco máximo de classificação;
+- cobertura automática mínima;
+- taxa máxima de falso positivo de duplicidade.
+
+O script recusa calcular pontos inferiores ao limiar usado na inferência,
+porque uma decisão já convertida em TRIAGEM_MANUAL não permite recuperar a
+classe original sem repetir a chamada.
+
+O benchmark só inicia quando:
+
+- existe arquivo de limiar aprovado;
+- o valor aprovado coincide com o `.env`;
+- workflows e manifesto foram regenerados;
+- a nova versão foi publicada.
+
+## 7. Comparadores e decisão sobre modelo próprio
+
+O Gemini será comparado no mesmo conjunto de teste com:
+
+- regra fixa;
+- classe majoritária;
+- Jaccard para duplicidade;
+- TF-IDF + regressão logística;
+- similaridade cosseno TF-IDF;
+- predições importadas de outro LLM;
+- futuramente, um modelo próprio, se existir.
+
+A decisão de criar um modelo próprio não será baseada apenas em o Gemini
+“errar alguns casos”. O modelo próprio deve demonstrar vantagem mensurável em
+pelo menos um dos seguintes pontos:
+
+- menor risco de falso positivo;
+- maior F1 macro ou recall de classes críticas;
+- menor custo;
+- menor latência;
+- maior privacidade;
+- menor dependência externa;
+- possibilidade de operação local.
+
+Se a maior parte dos erros decorrer da ausência de sala, ativo, sintoma ou
+catálogo no GLPI, treinar outro modelo não resolve a causa. Nesse caso, a
+prioridade deve ser melhorar o formulário e o catálogo.
+
+## 8. CI/CD implementado
+
+### 8.1 Fonte de verdade
+
+As fontes de verdade são:
+
+- builders Python para estrutura dos workflows;
+- TXT em `avaliacao/prompts` para prompts;
+- JSONs em `avaliacao/schemas` para contratos;
+- `database/init_v9.sql` para schema analítico e operacional;
+- `.env`/Compose para parâmetros;
+- manifesto para modelo, versões e hashes.
+
+Alterar apenas o workflow no editor do n8n cria divergência. A alteração correta
+é feita na fonte, seguida de regeneração, validação e deploy.
+
+### 8.2 Validação pré-deploy
+
+O validador estático confere:
+
+- compilação dos builders e scripts críticos;
+- JSON válido;
+- nomes e conexões dos nós;
+- inexistência de mocks;
+- ingresso público somente pelo WF06;
+- isolamento experimental;
+- observabilidade e probabilidades;
+- tabelas, índices e views SQL;
+- variáveis obrigatórias;
+- imagem Docker fixada;
+- healthchecks e redes;
+- identidade de prompt e schema;
+- modelo Gemini 3.5 Flash;
+- chave da API somente por variável de ambiente.
+
+### 8.3 Manifesto e congelamento
+
+O manifesto registra:
+
+- modelo;
+- versões dos prompts;
+- SHA-256 dos prompts;
+- SHA-256 dos schemas;
+- opções de geração;
+- nome da variável de seed;
+- versão do dataset;
+- transporte utilizado.
+
+Na execução experimental também são congelados hashes do código, dataset,
+calibração e limiar. O conjunto de teste não pode ser ajustado depois de aberto.
+
+### 8.4 Deploy e recuperação
+
+O deploy:
+
+- autentica no n8n;
+- salva um backup completo dos workflows atuais;
+- atualiza WF01 a WF06;
+- corrige IDs de chamadas entre subworkflows;
+- ativa o `versionId` retornado;
+- permite reler o workflow publicado.
+
+As imagens do n8n, PostgreSQL e Mailpit estão fixadas por versão e digest. O
+PostgreSQL possui healthcheck, e o n8n só inicia depois do banco saudável.
+
+## 9. Testes aplicados até agora
+
+### 9.1 Testes históricos de operação
+
+As baterias de maio e junho validaram:
+
+- disponibilidade de n8n, GLPI, PostgreSQL e Mailpit;
+- sincronização e retenção do WF01;
+- respostas 401/202 dos webhooks;
+- confirmação, rejeição, clique duplo e expiração de token fiscal;
+- rotas DEMO, SOB_DEMANDA, OBRA e TRIAGEM_MANUAL;
+- notificação e preservação de chamados em falha de IA;
+- consolidação de métricas pelo WF05.
+
+Também foi observado rate limit do Gemini em carga. Isso confirmou as rotas de
+erro, mas impediu alguns retestes.
+
+**Limitação:** esses resultados são evidência operacional histórica. Eles não
+validam o benchmark atual porque posteriormente foram alterados o ingresso
+público, o controle WF06, o modelo e o contrato estruturado.
+
+### 9.2 Validações da arquitetura atual
+
+| Verificação | Resultado até 02/07/2026 |
+|---|---|
+| Compilação dos builders e scripts | Aprovada |
+| Validação estática WF01–WF06 | Aprovada |
+| `docker compose config --quiet` | Aprovada |
+| Dataset piloto episódico | 50 tickets, 35 episódios, hash confirmado |
+| Vazamento piloto/teste | Validador aprovado em geração controlada |
+| Perfil `DEMO_OFF` | Três casos gerados corretamente |
+| Gate `DEMO_OFF` com fila ocupada | Recusa correta |
+| Gemini estruturado – deduplicação | JSON válido, campos obrigatórios presentes |
+| Gemini estruturado – classificação | JSON válido, campos obrigatórios presentes |
+| Deploy REST | WF01–WF06 atualizados e ativados |
+| Verificação pós-deploy | Nós WF02/WF03 relidos com schema e seed |
+| Workflows ativos | Seis workflows ativos |
+| Retenção de backup | Snapshot anterior ao deploy preservado |
+| Gate do novo piloto com limiar 0,65 | Recusa correta; exige 0,50 |
+
+### 9.3 O que ainda não foi testado na versão atual
+
+- piloto completo com os 94 rótulos adjudicados;
+- calibração repetida de vazão em fila vazia;
+- execução ponta a ponta do perfil DEMO_OFF;
+- curva oficial de limiar;
+- benchmark de 1.650 tickets;
+- repetição do benchmark em múltiplos `run_id`;
+- auditoria humana estratificada;
+- comparação com outro LLM ou modelo próprio;
+- validação externa com chamados reais anonimizados.
+
+## 10. Decisões metodológicas tomadas
+
+- O n8n permanece como motor operacional; Python é pesquisa e CI/CD.
+- WF06 é o único ingresso público.
+- Nenhum chamado experimental entra enquanto houver fila operacional.
+- A unidade estatística de reamostragem é o episódio.
+- O benchmark principal será zero-shot.
+- Few-shot será experimento secundário posterior.
+- O gabarito sintético deve ser validado por dois especialistas.
+- Divergências exigem adjudicação.
+- O limiar 0,65 não é resultado científico.
+- O novo piloto começa em 0,50 e calibra até 0,95.
+- O intervalo da fila é fixo dentro de cada tratamento.
+- O benchmark mínimo planejado usa 33 variações.
+- O teste deve comparar Gemini com baselines não-LLM.
+- Um modelo próprio só será recomendado mediante vantagem mensurável.
+- Sem chamados reais anonimizados, a conclusão será limitada a simulação
+    controlada.
+
+## 11. Estado atual e bloqueios legítimos
+
+Estado observado em 2 de julho de 2026:
+
+- 11 tickets em `PENDENTE_FILA_IA`;
+- 3 tickets em `FILA_IA_LIBERADA`;
+- total operacional que impede experimento: 14;
+- 94 decisões aguardando rótulo do revisor 1;
+- 94 decisões aguardando rótulo do revisor 2;
+- limiar operacional ainda em 0,65;
+- seis workflows V9 ativos;
+- containers n8n, PostgreSQL e Mailpit em execução.
+
+Esses itens não devem ser “corrigidos” apagando dados ou preenchendo rótulos
+automaticamente. A fila precisa ser drenada e os especialistas precisam
+produzir os rótulos.
+
+## 12. Sequência proposta após a reunião
+
+| Etapa | Ação |
+|---:|---|
+| 1 | Definir os dois especialistas e o adjudicador. |
+| 2 | Aprovar as instruções de rotulagem e o prazo. |
+| 3 | Drenar a fila operacional e reservar uma janela experimental. |
+| 4 | Alterar o limiar para 0,50, recriar o n8n e confirmar a configuração. |
+| 5 | Executar novo piloto. |
+| 6 | Rotular e adjudicar as 94 decisões. |
+| 7 | Calibrar o limiar de 0,50 a 0,95. |
+| 8 | Executar a calibração de fila com três ou mais repetições por tratamento. |
+| 9 | Executar o perfil DEMO_OFF. |
+| 10 | Congelar modelo, prompts, schemas, limiar, dataset e código. |
+| 11 | Confirmar quota e orçamento da API. |
+| 12 | Executar o benchmark de 1.650 tickets. |
+| 13 | Gerar métricas, bootstrap, McNemar e baselines. |
+| 14 | Executar auditoria humana estratificada. |
+| 15 | Importar predições de alternativa/modelo próprio. |
+| 16 | Redigir conclusões dentro do limite de validade do estudo. |
+
+## 13. Decisões solicitadas na próxima reunião
+
+### Decisão 1 – Especialistas
+
+**Pergunta:** quem serão os dois revisores e o terceiro adjudicador?  
+**Recomendação:** profissionais com experiência real em manutenção/obras e
+conhecimento do fluxo local, sem acesso ao rótulo sintético durante a revisão.
+
+### Decisão 2 – Chamados reais
+
+**Pergunta:** haverá autorização para usar amostra anonimizada de chamados
+reais?  
+**Recomendação:** se possível, usar somente para estimar prevalência e validade
+externa, com autorização, anonimização e separação do conjunto sintético.
+
+### Decisão 3 – Critérios de risco
+
+**Pergunta:** qual custo relativo de falso positivo de duplicidade, falso
+negativo e TRIAGEM_MANUAL será adotado?  
+**Recomendação:** definir os limites antes da calibração. Falso positivo de
+duplicidade deve receber peso elevado porque pode impedir o tratamento de uma
+demanda legítima.
+
+### Decisão 4 – Quota e orçamento
+
+**Pergunta:** existe quota e orçamento para 1.650 tickets, repetições e
+comparadores?  
+**Recomendação:** aprovar uma reserva antes de abrir o conjunto de teste.
+
+### Decisão 5 – Alternativa ao Gemini
+
+**Pergunta:** qual alternativa será comparada: outro LLM, modelo local ou modelo
+próprio treinado?  
+**Recomendação:** primeiro executar baselines e Gemini. Só investir em modelo
+próprio se houver dados rotulados suficientes e hipótese clara de vantagem.
+
+### Decisão 6 – Repetições
+
+**Pergunta:** o orçamento permite repetir o benchmark em três `run_id`?  
+**Recomendação:** realizar três repetições quando possível; caso contrário,
+declarar explicitamente a limitação estocástica.
+
+### Decisão 7 – Few-shot
+
+**Pergunta:** o estudo secundário few-shot fará parte do artigo atual?  
+**Recomendação:** não alterar o benchmark principal. Realizar few-shot somente
+depois, com exemplos escolhidos exclusivamente do piloto adjudicado.
+
+### Decisão 8 – Janela experimental
+
+**Pergunta:** quando a fila poderá ficar vazia e isolada para calibração?  
+**Recomendação:** reservar uma janela formal e registrar início, fim e estado da
+fila.
+
+## 14. Formulações seguras para o artigo
+
+Pode-se afirmar:
+
+- a infraestrutura experimental foi implementada com isolamento, congelamento,
+  observabilidade e gates;
+- os workflows e os contratos estruturados foram tecnicamente validados;
+- o protocolo permite medir eficácia, risco e desempenho;
+- existem evidências históricas de funcionamento operacional;
+- a avaliação final depende de especialistas, calibração e benchmark.
+
+Ainda não se pode afirmar:
+
+- que o Gemini atingiu bons índices no benchmark;
+- que o limiar 0,65 é ótimo;
+- que a fila suporta determinada vazão final;
+- que o Gemini é superior a modelo próprio;
+- que os resultados sintéticos representam a operação real;
+- que as métricas finais estão concluídas.
+
+## 15. Artefatos principais para consulta
+
+- `docs/arquitetura_experimental_v2.md`
+- `docs/auditoria_metodologica_v2.md`
+- `docs/limiar_confianca.md`
+- `avaliacao/metodologia_avaliacao.md`
+- `avaliacao/manifesto_modelo_prompts.json`
+- `avaliacao/datasets/dataset_piloto_v2.jsonl`
+- `avaliacao/datasets/validacao_rotulos_piloto_v2.csv`
+- `avaliacao/scripts/executar_avaliacao.py`
+- `avaliacao/scripts/calibrar_vazao.py`
+- `avaliacao/scripts/calibrar_limiar.py`
+- `avaliacao/scripts/conferir_gabarito.py`
+- `avaliacao/scripts/comparar_baselines.py`
+- `n8n/workflows/Versão9/validate_v9_static.py`
+- `n8n/workflows/Versão9/deploy_rest_session.py`
+
+## 16. Síntese para abertura da reunião
+
+“A infraestrutura necessária para avaliar o Gemini foi implementada e
+tecnicamente validada. O n8n continua executando toda a operação, enquanto os
+scripts externos garantem geração de dados, reprodutibilidade, métricas e
+deploy. Ainda não temos resultado científico final: precisamos primeiro
+esvaziar a fila, validar os 94 rótulos com especialistas, calibrar limiar e
+vazão e então executar o benchmark congelado. A reunião precisa decidir
+especialistas, critérios de risco, janela experimental, quota e qual alternativa
+será comparada ao Gemini.”

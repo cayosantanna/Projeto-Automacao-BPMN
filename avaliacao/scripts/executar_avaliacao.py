@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import datetime as dt
 import hashlib
 import json
-import math
 import subprocess
 import sys
-from collections import Counter
 from pathlib import Path
 
 
@@ -16,13 +13,13 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_DIR = Path(__file__).resolve().parent
 GENERATOR = SCRIPT_DIR / "gerar_dataset_avaliacao.py"
 CHECKER = SCRIPT_DIR / "conferir_gabarito.py"
-BASELINE = SCRIPT_DIR / "comparar_baselines.py"
 VALIDATOR = ROOT / "n8n" / "workflows" / "Versão9" / "validate_v9_static.py"
-DATASET_VALIDATOR = SCRIPT_DIR / "validar_dataset.py"
-SAMPLE_PLANNER = SCRIPT_DIR / "planejar_amostra.py"
 DATASET_VERSION = "dataset-v2.0.0-episodico"
 MODEL_CONFIG = ROOT / "avaliacao" / "config" / "modelos_ia_v1.json"
-MODEL_ROLES = ("PRIMARY", "SECONDARY", "LOCAL")
+# O gateway V9 expõe somente estes papéis. PRIMARY permanece no manifesto
+# histórico, mas não é uma rota executável no workflow publicado.
+MODEL_ROLES = ("LOCAL", "SECONDARY")
+AUTOMATED_PHASES = ("piloto", "validacao")
 
 
 def run(command: list[str]) -> None:
@@ -39,8 +36,8 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def model_metadata(role: str = "PRIMARY") -> tuple[str, dict]:
-    normalized_role = str(role or "PRIMARY").upper()
+def model_metadata(role: str = "LOCAL") -> tuple[str, dict]:
+    normalized_role = str(role or "LOCAL").upper()
     if normalized_role not in MODEL_ROLES:
         raise ValueError(
             f"Papel de modelo desconhecido: {normalized_role}. "
@@ -58,13 +55,11 @@ def model_metadata(role: str = "PRIMARY") -> tuple[str, dict]:
 
 
 def generation_profile(role: str, model: dict) -> str:
-    if role == "PRIMARY":
-        return "gemini-3.5-flash_default-sampling_medium-thinking"
     thinking = str(model.get("thinking_profile") or "provider_default")
     return f"{model['model']}_fixed-{thinking}"
 
 
-def code_manifest(phase: str = "", model_role: str = "PRIMARY") -> dict:
+def code_manifest(phase: str = "", model_role: str = "LOCAL") -> dict:
     normalized_role, selected_model = model_metadata(model_role)
     workflow_dir = ROOT / "n8n" / "workflows" / "Versão9"
     files = [
@@ -114,62 +109,35 @@ def code_manifest(phase: str = "", model_role: str = "PRIMARY") -> dict:
         "test_mode": True,
         "auto_human_confirmation": True,
         "auto_human_confirmation_source": "ORACULO_GABARITO",
+        "evidence_nature": "AUTOMATED_TECHNICAL_NON_CONFIRMATORY",
+        "oracle_is_human_review": False,
+        "confirmatory_eligible": False,
         "scientific_result": False,
     }
 
 
-def recommended_variations(pilot_dataset: Path, margin: float = 0.10) -> int:
-    cases = [
-        json.loads(line)
-        for line in pilot_dataset.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    counts = Counter(
-        case["expected_classification"]
-        for case in cases
-        if case.get("expected_classification")
-    )
-    if not counts:
-        raise RuntimeError("Piloto sem classes para planejamento amostral.")
-    minimum = math.ceil((1.959963984540054**2) * 0.25 / (margin**2))
-    return max(math.ceil(minimum / count) for count in counts.values())
-
-
-def export_predictions(run_id: str, path: Path) -> None:
-    sys.path.insert(0, str(SCRIPT_DIR))
-    import conferir_gabarito as checker
-
-    rows = checker.query(
-        """
-        SELECT DISTINCT ON (case_id,etapa)
-          case_id,etapa,predicao,confianca,output_normalizado
-        FROM ia_decisoes
-        WHERE run_id=%s
-        ORDER BY case_id,etapa,criado_em DESC,id DESC
-        """,
-        (run_id,),
-    )
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=["case_id", "etapa", "predicao", "confianca", "probabilidades"],
+def require_supported_route(phase: str, model_role: str) -> None:
+    """Recusa rotas que poderiam produzir evidência com rótulo incorreto."""
+    normalized_phase = str(phase or "").lower()
+    normalized_role = str(model_role or "").upper()
+    if normalized_phase == "benchmark":
+        raise SystemExit(
+            "BENCHMARK_CONFIRMATORIO_BLOQUEADO: executar_avaliacao.py usa "
+            "ORACULO_GABARITO e gabarito sintético; isso serve somente para "
+            "validação técnica não confirmatória. Um benchmark confirmatório "
+            "deve usar uma rota confirmatória V3 dedicada, ainda separada deste "
+            "utilitário, com holdout independente e rótulos humanos adjudicados. "
+            "Nenhum chamado foi criado."
         )
-        writer.writeheader()
-        for row in rows:
-            normalized = row.get("output_normalizado") or {}
-            writer.writerow(
-                {
-                    "case_id": row["case_id"],
-                    "etapa": row["etapa"],
-                    "predicao": row["predicao"],
-                    "confianca": row["confianca"],
-                    "probabilidades": json.dumps(
-                        normalized.get("probabilidades"),
-                        ensure_ascii=False,
-                        default=str,
-                    ),
-                }
-            )
+    if normalized_phase not in AUTOMATED_PHASES:
+        raise SystemExit(
+            f"Fase não suportada: {phase!r}. Use: {', '.join(AUTOMATED_PHASES)}."
+        )
+    if normalized_role not in MODEL_ROLES:
+        raise SystemExit(
+            f"Papel não executável no gateway V9: {normalized_role!r}. "
+            f"Use: {', '.join(MODEL_ROLES)}."
+        )
 
 
 def require_quiescent_queue() -> None:
@@ -198,7 +166,7 @@ def freeze_run(
     calibration_path: Path | None,
     threshold_path: Path | None,
     phase: str = "",
-    model_role: str = "PRIMARY",
+    model_role: str = "LOCAL",
 ) -> None:
     sys.path.insert(0, str(SCRIPT_DIR))
     import conferir_gabarito as checker
@@ -350,8 +318,9 @@ def fail_automated_validation(run_id: str, reason: str) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Executa piloto, validação automatizada não confirmatória ou "
-            "benchmark episódico com gates científicos."
+            "Executa piloto ou validação automatizada não confirmatória. "
+            "A opção benchmark é reconhecida apenas para falhar fechado com "
+            "uma orientação explícita."
         )
     )
     parser.add_argument("fase", choices=["piloto", "validacao", "benchmark"])
@@ -359,10 +328,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-role",
         choices=MODEL_ROLES,
-        default="PRIMARY",
+        default="LOCAL",
         help=(
-            "Papel fixo do modelo na execucao. Em validacao e benchmark o "
-            "fallback permanece desabilitado."
+            "Papel fixo aceito pelo gateway V9. O fallback permanece "
+            "desabilitado durante a validação."
         ),
     )
     parser.add_argument(
@@ -373,15 +342,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=20260702)
     parser.add_argument("--run-id", default="")
-    parser.add_argument("--piloto-validado-run-id", default="")
-    parser.add_argument("--piloto-dataset", type=Path)
     parser.add_argument("--calibracao-aprovada", type=Path)
     parser.add_argument("--limiar-aprovado", type=Path)
     parser.add_argument(
         "--timeout",
         type=int,
         default=86400,
-        help="Timeout do benchmark em segundos; padrão de 24 h cobre a fila cadenciada.",
+        help="Timeout da fila técnica em segundos; o padrão cobre a cadência.",
     )
     parser.add_argument("--saida-dir", default="avaliacao/resultados")
     parser.add_argument("--bootstrap", type=int, default=2000)
@@ -393,12 +360,6 @@ def parse_args() -> argparse.Namespace:
             "para permitir a análise de sensibilidade completa."
         ),
     )
-    parser.add_argument(
-        "--predicao-alternativa",
-        action="append",
-        default=[],
-        help="NOME=arquivo.csv; pode ser repetido para outro LLM/modelo próprio.",
-    )
     return parser.parse_args()
 
 
@@ -409,6 +370,7 @@ def build_generator_command(
     dataset_prefix: Path,
     threshold: float,
 ) -> list[str]:
+    require_supported_route(args.fase, args.model_role)
     return [
         sys.executable,
         str(GENERATOR),
@@ -421,11 +383,7 @@ def build_generator_command(
         "--dataset-version",
         DATASET_VERSION,
         "--split",
-        {
-            "piloto": "PILOTO",
-            "validacao": "VALIDACAO",
-            "benchmark": "TESTE",
-        }[args.fase],
+        {"piloto": "PILOTO", "validacao": "VALIDACAO"}[args.fase],
         "--model-role",
         args.model_role,
         "--run-id",
@@ -447,6 +405,15 @@ def build_generator_command(
 
 def main() -> int:
     args = parse_args()
+    # Este gate deve vir antes de ler configuração, criar diretório, acessar
+    # banco/GLPI ou executar qualquer subprocesso.
+    require_supported_route(args.fase, args.model_role)
+    print(
+        "[AVISO] ORACULO_GABARITO automatiza somente os cliques técnicos "
+        "WF04/WF05. Ele não é revisor humano, não valida generalização e "
+        "não torna esta execução confirmatória.",
+        flush=True,
+    )
     env_values = {}
     for line in (ROOT / "n8n" / ".env").read_text(encoding="utf-8").splitlines():
         if "=" in line and not line.lstrip().startswith("#"):
@@ -474,23 +441,7 @@ def main() -> int:
     per_scenario = args.por_cenario or {
         "piloto": 1,
         "validacao": 2,
-        "benchmark": 33,
     }[args.fase]
-    if args.fase == "benchmark":
-        if not args.piloto_validado_run_id:
-            raise SystemExit("Benchmark exige --piloto-validado-run-id.")
-        if not args.piloto_dataset:
-            raise SystemExit("Benchmark exige --piloto-dataset.")
-        if not args.calibracao_aprovada:
-            raise SystemExit("Benchmark exige --calibracao-aprovada.")
-        if not args.limiar_aprovado:
-            raise SystemExit("Benchmark exige --limiar-aprovado.")
-        required_variations = recommended_variations(args.piloto_dataset)
-        if per_scenario < required_variations:
-            raise SystemExit(
-                f"Benchmark exige ao menos {required_variations} variações por "
-                "cenário para o suporte conservador de ±10% por classe."
-            )
     timestamp = dt.datetime.now().strftime("%Y%m%dT%H%M%S")
     run_id = args.run_id or f"{args.fase.upper()}-{timestamp}"
     out_dir = ROOT / args.saida_dir / run_id
@@ -500,25 +451,6 @@ def main() -> int:
     run([sys.executable, str(VALIDATOR)])
     require_quiescent_queue()
     run(build_generator_command(args, per_scenario, run_id, dataset_prefix, threshold))
-    if args.fase == "benchmark":
-        run(
-            [
-                sys.executable,
-                str(DATASET_VALIDATOR),
-                str(dataset_prefix.with_suffix(".jsonl")),
-                "--comparar-com",
-                str(args.piloto_dataset),
-            ]
-        )
-        run(
-            [
-                sys.executable,
-                str(SAMPLE_PLANNER),
-                str(args.piloto_dataset),
-                "--saida",
-                str(out_dir / "planejamento_amostral.json"),
-            ]
-        )
     freeze_run(
         run_id,
         out_dir / "freeze_manifest.json",
@@ -535,7 +467,6 @@ def main() -> int:
             "--resolver-confirmacoes-automaticas",
             "--timeout",
             str(args.timeout),
-            "--registrar-gabarito",
         ]
     report_args = [
         "--gerar-relatorio",
@@ -549,48 +480,13 @@ def main() -> int:
     if args.fase == "validacao":
         try:
             run(checker_base + processing_args)
-            finalize_automated_validation(run_id)
             run(checker_base + report_args)
+            finalize_automated_validation(run_id)
         except Exception as exc:
             fail_automated_validation(run_id, f"{type(exc).__name__}: {exc}")
             raise
     else:
         run(checker_base + processing_args + report_args)
-    if args.fase == "benchmark":
-        normalized_role, selected_model = model_metadata(args.model_role)
-        if normalized_role == "PRIMARY":
-            predictions_filename = "predicoes_gemini_3_5_flash.csv"
-            prediction_label = "GEMINI_3_5_FLASH"
-        else:
-            predictions_filename = f"predicoes_{normalized_role.lower()}.csv"
-            prediction_label = normalized_role
-        predictions_path = out_dir / predictions_filename
-        export_predictions(run_id, predictions_path)
-        baseline_command = [
-            sys.executable,
-            str(BASELINE),
-            "--piloto",
-            str(args.piloto_dataset),
-            "--teste",
-            str(dataset_prefix.with_suffix(".jsonl")),
-            "--predicoes",
-            f"{prediction_label}={predictions_path}",
-            "--saida",
-            str(out_dir / "comparacao_baselines.json"),
-            "--seed",
-            str(args.seed),
-            "--bootstrap",
-            str(args.bootstrap),
-        ]
-        for prediction in args.predicao_alternativa:
-            baseline_command.extend(["--predicoes", prediction])
-        run(baseline_command)
-        if not args.predicao_alternativa:
-            print(
-                "[AVISO] Nenhum outro LLM/modelo próprio foi informado; "
-                f"a comparação final contém {selected_model['model']} e "
-                "baselines não-LLM."
-            )
     return 0
 
 

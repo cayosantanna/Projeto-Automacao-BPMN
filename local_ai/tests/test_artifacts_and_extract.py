@@ -552,6 +552,77 @@ class ArtifactAndExtractionTests(unittest.TestCase):
         self.assertEqual(extracted["sintoma"], "ruido")
         self.assertTrue(extracted["informacao_suficiente_classificacao"])
 
+    def test_structured_ner_entities_extraction(self) -> None:
+        cases = (
+            (
+                {
+                    "title": "Ar condicionado não gela",
+                    "content": "O ar condicionado split não gela na sala 204 do Bloco B, patrimônio 123456",
+                    "location": "Bloco B - Sala 204",
+                },
+                "204",
+                "bloco b",
+                "123456",
+                "ar_condicionado",
+            ),
+            (
+                {
+                    "title": "Projetor com defeito",
+                    "content": "Projetor não liga no Laboratório de Informática 02 do Prédio Central, tombamento nº 98765",
+                    "location": "Prédio Central",
+                },
+                "02",
+                "predio central",
+                "98765",
+                "projetor",
+            ),
+            (
+                {
+                    "title": "Lâmpada queimada",
+                    "content": "Lâmpada queimada na Sala 01 do DACC",
+                    "location": "DACC",
+                },
+                "01",
+                "dacc",
+                None,
+                "lampada",
+            ),
+            (
+                {
+                    "title": "Manutenção em equipamento",
+                    "content": "Autoclave com vazamento na Seção de Análise de Solos, tag RPB-DAAA-SAS",
+                    "location": "DAAA",
+                },
+                None,
+                "daaa",
+                "RPB-DAAA-SAS",
+                "autoclave",
+            ),
+        )
+        for ticket, exp_sala, exp_bloco, exp_patrimonio, exp_equip in cases:
+            with self.subTest(title=ticket["title"]):
+                extracted = deterministic_extract(ticket, 6000)
+                self.assertEqual(extracted["numero_sala"], exp_sala)
+                self.assertEqual(extracted["bloco"], exp_bloco)
+                self.assertEqual(extracted["numero_patrimonio"], exp_patrimonio)
+                self.assertEqual(extracted["tipo_equipamento"], exp_equip)
+                self.assertIn("entidades_estruturadas", extracted)
+                self.assertEqual(
+                    extracted["entidades_estruturadas"]["numero_sala"], exp_sala
+                )
+                self.assertEqual(
+                    extracted["entidades_estruturadas"]["bloco"], exp_bloco
+                )
+                self.assertEqual(
+                    extracted["entidades_estruturadas"]["numero_patrimonio"],
+                    exp_patrimonio,
+                )
+                self.assertEqual(
+                    extracted["entidades_estruturadas"]["tipo_equipamento"],
+                    exp_equip,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
+

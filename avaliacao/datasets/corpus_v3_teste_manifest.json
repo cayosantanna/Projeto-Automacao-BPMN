@@ -7,6 +7,11 @@
   "logical_corpus_id": "CORPUS-V3-TESTE-EFE4F26CB2",
   "dataset_version": "dataset-v3.0.0-contrastes-agrupados",
   "split": "TESTE",
+  "split_semantics": "NOME_HISTORICO; ARTEFATO EXPOSTO E USADO EM DESENVOLVIMENTO",
+  "analysis_scope": "DEVELOPMENT_PILOT_ONLY",
+  "confirmatory_eligible": false,
+  "pilot_only": true,
+  "labels_exposed": true,
   "seed": 20260710,
   "execution_partitions": {
     "CLASS-R01": 40,
@@ -69,7 +74,9 @@
     },
     "generator": {
       "path": "avaliacao\\scripts\\gerar_dataset_v3.py",
-      "sha256": "b6dd63c93dc319f37c7a70fff0868560fac572a0583a9c174414a3c3713d9794"
+      "sha256": "b6dd63c93dc319f37c7a70fff0868560fac572a0583a9c174414a3c3713d9794",
+      "availability": "HISTORICAL_SOURCE_MISSING",
+      "note": "O gerador histórico não está presente no repositório atual; o hash foi preservado como evidência e não foi atribuído a outro script."
     }
   },
   "limitations": [
@@ -77,6 +84,8 @@
     "Os rótulos precisam de dupla revisão e adjudicação antes do uso confirmatório.",
     "As realizações superficiais são dependentes; intervalos devem agrupar por narrative_core.",
     "O executor V2 não deve ser usado silenciosamente: o V3 exige dez partições físicas agregadas em um corpus lógico.",
-    "Este artefato não contém saída de LLM e não constitui resultado de eficácia."
+    "Este artefato não contém saída de LLM e não constitui resultado de eficácia.",
+    "Os gabaritos e justificativas estão expostos e o corpus foi usado durante o desenvolvimento; apesar do nome histórico TESTE, ele não é holdout confirmatório.",
+    "O gerador histórico registrado no manifesto não está disponível no repositório atual, portanto a geração original não é reproduzível somente com esta árvore."
   ]
 }

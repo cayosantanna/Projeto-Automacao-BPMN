@@ -8,40 +8,47 @@ manifesto congelado, predições e relatórios. Artefatos com os prefixos
 `diagnostico_` ou `baseline_v2_preliminar` não são resultados confirmatórios e
 não podem ser apresentados como eficácia do Gemini.
 
-O arquivo `resultados_preliminares_2026-07-10.md` registra o que já pode e o que
-ainda não pode ser concluído. Um resultado final V3 exige gabarito adjudicado,
-calibração aprovada, auditoria humana e `run_id` concluído.
+Os resultados brutos são locais e ficam fora da distribuição pública. A árvore
+de resultados pode conter artefatos históricos removidos ou invalidados; por
+isso documentos e gráficos nunca devem depender apenas do nome de uma pasta.
+Cada afirmação precisa citar `run_id`, versão, hash, unidade amostral e fase
+(`REGRESSAO`, `PILOTO`, `CALIBRACAO` ou `CONFIRMATORIO`).
 
-`resultados_tecnicos_2026-07-14.md` e
-`contrato_provedores_2026-07-14.json` documentam a integração multi-modelo e o
-smoke test ponta a ponta. Ambos são diagnósticos técnicos, não métricas de
-eficácia.
+O candidato vigente é `local-hybrid-v1.8.0`. Seus números sobre 1.240 entradas
+reutilizam o corpus sintético de desenvolvimento e são regressão técnica, não
+generalização. A comparação v1.1 x v1.8 mede disponibilidade e comportamento no
+mesmo corpus. O Granite 350M permanece opcional e desligado no caminho padrão.
 
-`contrato_provedores_2026-07-15.json` inclui o papel operacional
-`FREE_CONTINGENCY` (`gemini-3.1-flash-lite`). O sucesso de contrato de um modelo
-não prova menor erro decisório; a eficácia de cada modelo exige execução fixa,
-sem fallback, em `run_id` próprio.
+A seleção supervisionada v1.3 terminou em 17/08/2026 e seus artefatos foram
+recalculados por um validador independente. Essa checagem ocorreu no mesmo
+corpus de desenvolvimento; não é um holdout independente. O resultado completo
+contém 90 configurações, 50.780 predições fora da dobra, 450 dobras, 18
+comparações pareadas por grupos, 100 comparações dos objetivos, duas explicações
+XAI e três cenários de latência. O híbrido Granite + TF-IDF foi o candidato
+provisório nas duas tarefas, mas ambos os resultados ficaram `UNDERPOWERED`. O
+resumo continua sendo desenvolvimento e não substitui o holdout confirmatório.
 
-`benchmark_embedding_pytorch_fp32_2026-07-15.json` consolida o ensaio técnico
-de 1, 2 e 4 threads do Granite Embedding. Mede somente o componente de
-embedding, não eficácia nem latência ponta a ponta.
+A execução integral v1.9 teve 1.239/1.240 respostas válidas e foi marcada com
+uma limitação explícita por uma falha HTTP 503 de memória. Na comparação
+conservadora, ela aumentou cobertura, mas perdeu disponibilidade e latência para
+a v1.8; por isso não foi promovida. As tentativas v1.9 interrompidas ou
+contaminadas por autenticação/concorrência possuem `INVALIDADO.md` e não entram
+em nenhuma conclusão.
 
-`treino-local-pytorch-fp32-v1.1.0-conservador-20260715` contém o bundle e o
-manifesto do bundle candidato local conservador congelado. O bundle está
-calibrado e marcado `evaluation_eligible=true`; o pipeline completo ainda exige
-regressão e freeze dos adaptadores/gates/workflows. O manifesto mantém
-`scientifically_validated=false` e `scientific_result=false`; suas métricas são
-internas ao desenvolvimento sintético.
+A sequência operacional vigente é `LOCAL,SECONDARY`, com Gemini 3.5 Flash como
+secundário somente após falha explícita. Em benchmark, cada modelo deve ser
+executado isoladamente e sem fallback. Nenhum artefato remoto inválido, 429,
+timeout ou resposta sem pares pode ser promovido a comparação de eficácia.
 
-`ablacao-tfidf-v1.1.0-20260715` repete split, seed e pipeline sem o Granite para
-comparar TF-IDF isolado com o híbrido. É ablação interna sintética, não
-benchmark final.
+Antes do holdout, consulte `avaliacao/PRE_REGISTRO_PENDENTE.md`. Enquanto a
+margem, o estimando, o limite de risco crítico e o baseline manual não forem
+congelados, uma rodada pareada será descritiva.
 
 A decisão de 15/07/2026 permite testes automatizados contra o gabarito
 sintético sem dupla revisão nesta etapa. Esses relatórios devem ser rotulados
 como concordância sintética e não podem ser promovidos a eficácia real. As
 confirmações humanas permanecem nos workflows; o oráculo determinístico externo
 de teste apenas percorre as transições depois do registro da predição e não
-constitui revisão humana ou validação externa. Consulte
-`docs/auditoria_amostral_v4.md` para as metas do corpus de aproximadamente
-2.078 chamados na expansão futura V4.1; nenhum caso novo é gerado agora.
+constitui revisão humana ou validação externa. As 33 famílias com 30 variações
+produzem 990 realizações de cenário, mas não 990 unidades semânticas
+independentes; os episódios duplicados ainda geram mais de um ticket GLPI.

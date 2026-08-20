@@ -200,14 +200,43 @@ _PATRIMONIAL_LOCATION_PATTERN = re.compile(
     r"\b(?:patrimonio|tombamento|numero de patrimonio|ativo patrimonial)\s+"
     r"(?:n(?:umero)?\s+)?[a-z0-9-]*[0-9][a-z0-9-]*\b"
 )
+_ROOM_IDENTIFIER_PATTERN = re.compile(
+    r"\b(?:sala(?:\s+de\s+aula)?|lab(?:oratorio)?(?:\s+de\s+[a-z0-9-]+)*|gabinete|box)\s+"
+    r"(?:(?:de|da|do|dos|das)\s+)?"
+    r"(?:n(?:umero|º|\.)?\s*)?([0-9]+[a-z0-9-]*|[a-z]-[0-9]+|[a-z]\b)",
+    re.IGNORECASE,
+)
+_PATRIMONY_TAG_PATTERN = re.compile(
+    r"\b(?:patrimonio|tombamento|ativo patrimonial|patrimonial)\s+"
+    r"(?:n(?:umero|º|\.)?\s*)?([a-z0-9-]*[0-9][a-z0-9-]*)\b",
+    re.IGNORECASE,
+)
+_TAG_CODE_PATTERN = re.compile(r"\b(rpb-[a-z0-9-]+)\b", re.IGNORECASE)
+_BLOCK_IDENTIFIER_PATTERN = re.compile(
+    r"\bbloco\s+([a-z0-9-]+)\b",
+    re.IGNORECASE,
+)
+_CAMPUS_DEPT_BUILDING_PATTERNS = (
+    re.compile(
+        r"\b(?:predio\s+(?:central|administrativo|da\s+prefeitura|da\s+agroecologia|"
+        r"do\s+refeitorio|do\s+almoxarifado|do\s+setor\s+de\s+transporte|da\s+reciclagem|"
+        r"da\s+gti|da\s+enfermaria|do\s+nai|da\s+extensao))\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:biblioteca\s+jofre\s+moreira|biblioteca\s+central)\b", re.IGNORECASE),
+    re.compile(r"\b(?:dacc|dacg|daaa|dcta|dmafe|daz|cead|gti|nai)\b", re.IGNORECASE),
+)
 _UNIQUE_NAMED_LOCATION_PATTERNS = (
     re.compile(
-        r"\b(?:biblioteca central|restaurante estudantil|"
+        r"\b(?:biblioteca central|biblioteca jofre moreira|restaurante estudantil|"
         r"residencia estudantil(?:\s+[a-z0-9-]+)?|ginasio do campus|"
         r"auditorio academico|unidade rural experimental|"
         r"oficina de manutencao|portaria principal|almoxarifado patrimonial|"
         r"centro de pesquisa aplicada|area de convivencia(?:\s+[a-z0-9-]+){0,2}|"
-        r"predio central)\b"
+        r"predio central|predio administrativo|predio da prefeitura|"
+        r"predio da agroecologia|predio do refeitorio|predio do almoxarifado|"
+        r"predio do setor de transporte|predio da reciclagem|predio da gti|"
+        r"predio da enfermaria|predio do nai|predio da extensao)\b"
     ),
     re.compile(
         r"\b(?:setor|predio|pavilhao)\s+(?:de|da|do|dos|das)\s+"
@@ -224,11 +253,15 @@ _CONTEXTUAL_LOCATION_PATTERNS = (
         r"\b(?:bloco|predio|pavilhao|departamento|setor)\s+[a-z0-9-]+(?:\s+[a-z0-9-]+){0,3}\b"
     ),
     re.compile(
-        r"\b(?:fazenda escola|predio central|biblioteca central|"
+        r"\b(?:fazenda escola|predio central|biblioteca central|biblioteca jofre moreira|"
         r"restaurante estudantil|residencia estudantil(?:\s+[a-z0-9-]+)?|"
         r"ginasio do campus|auditorio academico|unidade rural experimental|"
         r"oficina de manutencao|portaria principal|almoxarifado patrimonial|"
-        r"centro de pesquisa aplicada|area de convivencia(?:\s+[a-z0-9-]+){0,2})\b"
+        r"centro de pesquisa aplicada|area de convivencia(?:\s+[a-z0-9-]+){0,2}|"
+        r"predio administrativo|predio da prefeitura|predio da agroecologia|"
+        r"predio do refeitorio|predio do almoxarifado|predio do setor de transporte|"
+        r"predio da reciclagem|predio da gti|predio da enfermaria|predio do nai|"
+        r"predio da extensao|dacc|dacg|daaa|dcta|dmafe|daz|cead)\b"
     ),
 )
 _LOCATION_IDENTIFIER_STOPWORDS = frozenset(
@@ -563,6 +596,87 @@ def _has_true_necessity_contradiction(text: str) -> bool:
     return bool(negative_actions.intersection(positive_actions))
 
 
+def _extract_room_number(text: str, locations: list[str]) -> str | None:
+    for loc in locations:
+        match = _ROOM_IDENTIFIER_PATTERN.search(loc)
+        if match:
+            val = match.group(1).strip()
+            if (
+                val
+                and val not in _LOCATION_IDENTIFIER_STOPWORDS
+                and val not in _LOCATION_GENERIC_IDENTIFIERS
+            ):
+                return val
+    match = _ROOM_IDENTIFIER_PATTERN.search(text)
+    if match:
+        val = match.group(1).strip()
+        if (
+            val
+            and val not in _LOCATION_IDENTIFIER_STOPWORDS
+            and val not in _LOCATION_GENERIC_IDENTIFIERS
+        ):
+            return val
+    return None
+
+
+def _extract_patrimony_number(text: str, raw_text: str = "") -> str | None:
+    if raw_text:
+        match_raw = re.search(
+            r"\b(?:patrimonio|tombamento|ativo patrimonial|patrimonial|tag)\s+(?:n(?:umero|º|\.)?\s*)?([a-z0-9-]+)\b",
+            raw_text,
+            re.IGNORECASE,
+        )
+        if match_raw:
+            val = match_raw.group(1).strip()
+            if any(ch.isdigit() for ch in val) or val.upper().startswith("RPB-"):
+                return val
+        code_match = re.search(r"\b(rpb-[a-z0-9-]+)\b", raw_text, re.IGNORECASE)
+        if code_match:
+            return code_match.group(1).strip().upper()
+    match = _PATRIMONY_TAG_PATTERN.search(text)
+    if match:
+        val = match.group(1).strip()
+        if any(ch.isdigit() for ch in val):
+            return val
+    tag_match = re.search(r"\btag\s+([a-z0-9-]+)\b", text, re.IGNORECASE)
+    if tag_match:
+        return tag_match.group(1).strip()
+    return None
+
+
+def _extract_block_or_building(
+    text: str,
+    contextual_locations: list[str],
+    explicit_location: str | None = None,
+) -> str | None:
+    block_match = _BLOCK_IDENTIFIER_PATTERN.search(text)
+    if block_match:
+        return f"bloco {block_match.group(1)}"
+    if explicit_location:
+        norm_exp = normalize_text(explicit_location)
+        block_match = _BLOCK_IDENTIFIER_PATTERN.search(norm_exp)
+        if block_match:
+            return f"bloco {block_match.group(1)}"
+        for pattern in _CAMPUS_DEPT_BUILDING_PATTERNS:
+            match = pattern.search(norm_exp)
+            if match:
+                return match.group(0)
+    for pattern in _CAMPUS_DEPT_BUILDING_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return match.group(0)
+    for loc in contextual_locations:
+        norm = normalize_text(loc)
+        block_match = _BLOCK_IDENTIFIER_PATTERN.search(norm)
+        if block_match:
+            return f"bloco {block_match.group(1)}"
+        for pattern in _CAMPUS_DEPT_BUILDING_PATTERNS:
+            match = pattern.search(norm)
+            if match:
+                return match.group(0)
+    return None
+
+
 def _classification_information_sufficient(
     *,
     asset: Any,
@@ -825,6 +939,18 @@ def deterministic_extract(ticket: dict[str, Any], max_chars: int) -> dict[str, A
         missing.append("ativo_ou_elemento")
     if not symptom:
         missing.append("sintoma_ou_acao")
+    numero_sala = _extract_room_number(text, locations)
+    numero_patrimonio = _extract_patrimony_number(text, raw)
+    bloco = _extract_block_or_building(
+        text, contextual_locations, explicit_location
+    )
+    tipo_equipamento = asset
+    entidades_estruturadas = {
+        "numero_sala": numero_sala,
+        "bloco": bloco,
+        "numero_patrimonio": numero_patrimonio,
+        "tipo_equipamento": tipo_equipamento,
+    }
     return {
         "titulo_normalizado": normalize_text(ticket.get("titulo") or ticket.get("name")),
         "texto_normalizado": text,
@@ -855,6 +981,11 @@ def deterministic_extract(ticket: dict[str, Any], max_chars: int) -> dict[str, A
             serviceable_for_specialized_policy
         ),
         "localizacao_suficiente_deduplicacao": bool(locations),
+        "numero_sala": numero_sala,
+        "bloco": bloco,
+        "numero_patrimonio": numero_patrimonio,
+        "tipo_equipamento": tipo_equipamento,
+        "entidades_estruturadas": entidades_estruturadas,
         "ativo": asset,
         "ativos_detectados": detected_assets,
         "grupos_operacionais_detectados": operational_asset_groups,
@@ -1083,6 +1214,11 @@ class OptionalGraniteExtractor:
                 "localizacao_atendivel_politica_especializada",
                 "categoria_normalizada",
                 "indicador_problema_generico",
+                "numero_sala",
+                "bloco",
+                "numero_patrimonio",
+                "tipo_equipamento",
+                "entidades_estruturadas",
             ):
                 merged[safety_key] = deterministic.get(safety_key)
             refined_locations = merged.get("localizacoes") or []

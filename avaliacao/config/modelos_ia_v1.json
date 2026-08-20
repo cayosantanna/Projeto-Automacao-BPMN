@@ -1,6 +1,6 @@
 {
-  "schema_version": "1.3.0",
-  "verified_at": "2026-07-15",
+  "schema_version": "1.4.0",
+  "verified_at": "2026-08-17",
   "operational_policy": {
     "name": "local-pytorch-fp32-com-gemini35-secundario-v4",
     "sequence": ["LOCAL", "SECONDARY"],
@@ -70,11 +70,44 @@
     "abstention_is_not_triagem_manual": true,
     "granite_downloaded": true
   },
+  "remote_benchmark_candidates": {
+    "GEMINI_3_5_FLASH": {
+      "provider": "google",
+      "model": "gemini-3.5-flash",
+      "model_stage": "stable",
+      "standard_free_tier_listed": true,
+      "free_tier_data_used_to_improve_provider_products": true,
+      "active_quota_must_be_checked_in_ai_studio": true,
+      "quota_scope": "project_not_api_key",
+      "benchmark_role": "paired_development_only_until_independent_holdout",
+      "retry_enabled": false,
+      "fallback_enabled": false
+    },
+    "DEEPSEEK_V4_FLASH": {
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash",
+      "model_version_observed_in_official_docs": "DeepSeek-V4-Flash-0731",
+      "guaranteed_free_api_tier": false,
+      "billing": "usage_based_or_granted_balance",
+      "official_account_concurrency_limit": 2500,
+      "public_general_rpm_tpm_rpd_limits_listed": false,
+      "legacy_aliases_retired": ["deepseek-chat", "deepseek-reasoner"],
+      "benchmark_role": "blocked_pending_dedicated_paired_adapter_and_cost_authorization",
+      "retry_enabled": false,
+      "fallback_enabled": false,
+      "active_operational_role": false
+    }
+  },
   "sources": {
     "gemini_models_and_pricing": "https://ai.google.dev/gemini-api/docs/pricing",
-    "gemini_structured_output": "https://ai.google.dev/gemini-api/docs/structured-output",
+    "gemini_model_35": "https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash",
+    "gemini_rate_limits": "https://ai.google.dev/gemini-api/docs/rate-limits",
+    "gemini_structured_output": "https://ai.google.dev/gemini-api/docs/generate-content/structured-output",
     "gemini_thinking": "https://ai.google.dev/gemini-api/docs/generate-content/thinking",
     "deepseek_models_and_pricing": "https://api-docs.deepseek.com/quick_start/pricing",
-    "deepseek_chat_completions": "https://api-docs.deepseek.com/api/create-chat-completion"
+    "deepseek_chat_completions": "https://api-docs.deepseek.com/api/create-chat-completion",
+    "deepseek_rate_limits": "https://api-docs.deepseek.com/quick_start/rate_limit",
+    "deepseek_thinking": "https://api-docs.deepseek.com/guides/thinking_mode",
+    "deepseek_json_output": "https://api-docs.deepseek.com/guides/json_mode"
   }
 }

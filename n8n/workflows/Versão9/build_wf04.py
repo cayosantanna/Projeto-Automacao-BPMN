@@ -15,7 +15,7 @@ from helpers import sanitize_workflow_secrets
 
 DIR = Path(__file__).resolve().parent
 EXPECTED_NAME = 'V9 - WF04 Decisão Fiscal'
-SNAPSHOT_SHA256 = '8db10284a95dd0a544efbac3be9bb90165da0c29f5c9accb164f8a8b418a2252'
+SNAPSHOT_SHA256 = '6465b912720afa57b452e59feb74931b1b5ec0ad7348bb07dfd92a9332a691a8'
 OUTPUT_FILES = ['V9-WF04-Decisao-Fiscal.json']
 
 WORKFLOW = {'name': 'V9 - WF04 Decisão Fiscal',

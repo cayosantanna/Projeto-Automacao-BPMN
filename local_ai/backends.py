@@ -104,7 +104,7 @@ class _GraniteEmbeddingBackend:
             digest.update(relative)
             file_digest = hashlib.sha256()
             with item.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                for chunk in iter(lambda: handle.read(65536), b""):
                     file_digest.update(chunk)
             digest.update(file_digest.digest())
         return digest.hexdigest()
@@ -177,14 +177,21 @@ class _GraniteEmbeddingBackend:
     def encode(self, texts: list[str]) -> list[list[float]]:
         model = self._load()
         try:
-            vectors = model.encode(
-                texts,
-                batch_size=min(8, len(texts)),
-                normalize_embeddings=True,
-                convert_to_numpy=True,
-                show_progress_bar=False,
-            )
+            import gc
+            import torch  # type: ignore
+
+            torch.set_num_threads(2)
+            with torch.inference_mode():
+                vectors = model.encode(
+                    texts,
+                    batch_size=min(4, len(texts)),
+                    normalize_embeddings=True,
+                    convert_to_numpy=True,
+                    show_progress_bar=False,
+                )
             result = [[float(item) for item in vector.tolist()] for vector in vectors]
+            del vectors
+            gc.collect()
         except Exception as exc:
             raise BackendUnavailable(f"Falha na inferência Granite 97M: {exc}") from exc
         if result:

@@ -451,7 +451,7 @@ function operationalChain(role) {
     .map(item=>item.trim().toUpperCase())
     .filter((item,index,array)=>supportedRoles.includes(item) && array.indexOf(item)===index);
   if (configured.length > 0) return configured;
-  if (role === 'LOCAL') return ['LOCAL',...roles];
+  if (role === 'LOCAL') return [...roles];
   return [...remotePolicyChain(),'LOCAL'];
 }
 const chain = policyViolation ? [] : (failoverAllowed ? operationalChain(fixedRole) : [fixedRole]);
@@ -472,6 +472,12 @@ async function callProvider(config, order) {
     ? (benchmark ? 'DEDUP_BENCHMARK_PAIRED_FROZEN'
       : (config.provider === 'local-native' ? 'DEDUP_LOCAL_TOP_K' : 'DEDUP_REMOTE_CANDIDATES'))
     : 'CLASSIFICACAO_COMPACTA';
+  const maxProviderAttempts = config.provider === 'local-native'
+    ? 1
+    : boundedInteger(envValue('IA_PROVIDER_MAX_RETRIES', '3'), 3, 1, 5);
+  const baseBackoffMs = boundedInteger(envValue('IA_PROVIDER_BACKOFF_BASE_MS', '1500'), 1500, 500, 30000);
+  const maxBackoffMs = boundedInteger(envValue('IA_PROVIDER_BACKOFF_MAX_MS', '15000'), 15000, 1000, 60000);
+  const httpTimeoutMs = boundedInteger(envValue('IA_HTTP_TIMEOUT_MS', '30000'), 30000, 5000, 120000);
   let raw = null;
   let transportOk = false;
   let errorCode = null;
@@ -481,83 +487,111 @@ async function callProvider(config, order) {
   let retryable = false;
   let errorType = null;
   let endpointUsed = config.endpoint || null;
-  try {
-    if (config.requires_key !== false && !config.key) {
-      errorCode = 'MISSING_CREDENTIAL';
-      errorType = 'CONFIGURATION';
-      throw new Error(`Credencial ausente para ${config.role}`);
-    }
-    if (config.provider === 'google') {
-      endpointUsed = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.model)}:generateContent`;
-      const generationConfig = {
-        responseMimeType:'application/json',
-        responseJsonSchema:RESPONSE_SCHEMA,
-        maxOutputTokens:4096,
-        seed
-      };
-      if (config.role === 'PRIMARY') {
-        generationConfig.thinkingConfig = {thinkingLevel:'MEDIUM'};
+  let providerAttempt = 0;
+
+  while (providerAttempt < maxProviderAttempts) {
+    providerAttempt++;
+    raw = null;
+    transportOk = false;
+    errorCode = null;
+    errorMessage = null;
+    httpStatus = null;
+    retryAfterSeconds = null;
+    retryable = false;
+    errorType = null;
+    endpointUsed = config.endpoint || null;
+
+    try {
+      if (config.requires_key !== false && !config.key) {
+        errorCode = 'MISSING_CREDENTIAL';
+        errorType = 'CONFIGURATION';
+        throw new Error(`Credencial ausente para ${config.role}`);
       }
-      raw = await helpers.httpRequest({
-        method:'POST',
-        url:endpointUsed,
-        headers:{'x-goog-api-key':config.key,'Content-Type':'application/json'},
-        body:{
-          contents:[{role:'user',parts:[{text:prompt}]}],
-          generationConfig
-        },
-        json:true,
-        timeout:30000
-      });
-    } else if (config.provider === 'local-native') {
-      const localHeaders = {'Content-Type':'application/json'};
-      if (config.key) localHeaders.Authorization = `Bearer ${config.key}`;
-      raw = await helpers.httpRequest({
-        method:'POST',
-        url:config.endpoint,
-        headers:localHeaders,
-        body:nativeLocalBody,
-        json:true,
-        timeout:config.timeout_ms
-      });
-    } else {
-      errorCode = 'UNSUPPORTED_PROVIDER';
-      errorType = 'CONFIGURATION';
-      throw new Error(`Provedor não suportado: ${config.provider}`);
-    }
-    if (raw?.error || raw?.errorMessage) {
-      const metadata = transportMetadata(raw, raw);
+      if (config.provider === 'google') {
+        endpointUsed = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.model)}:generateContent`;
+        const generationConfig = {
+          responseMimeType:'application/json',
+          responseJsonSchema:RESPONSE_SCHEMA,
+          maxOutputTokens:4096,
+          seed
+        };
+        if (config.role === 'PRIMARY') {
+          generationConfig.thinkingConfig = {thinkingLevel:'MEDIUM'};
+        }
+        raw = await helpers.httpRequest({
+          method:'POST',
+          url:endpointUsed,
+          headers:{'x-goog-api-key':config.key,'Content-Type':'application/json'},
+          body:{
+            contents:[{role:'user',parts:[{text:prompt}]}],
+            generationConfig
+          },
+          json:true,
+          timeout:httpTimeoutMs
+        });
+      } else if (config.provider === 'local-native') {
+        const localHeaders = {'Content-Type':'application/json'};
+        if (config.key) localHeaders.Authorization = `Bearer ${config.key}`;
+        raw = await helpers.httpRequest({
+          method:'POST',
+          url:config.endpoint,
+          headers:localHeaders,
+          body:nativeLocalBody,
+          json:true,
+          timeout:config.timeout_ms
+        });
+      } else {
+        errorCode = 'UNSUPPORTED_PROVIDER';
+        errorType = 'CONFIGURATION';
+        throw new Error(`Provedor não suportado: ${config.provider}`);
+      }
+      if (raw?.error || raw?.errorMessage) {
+        const metadata = transportMetadata(raw, raw);
+        httpStatus = metadata.http_status;
+        retryAfterSeconds = metadata.retry_after_seconds;
+        retryable = metadata.retryable;
+        errorType = metadata.error_type;
+        errorCode = metadata.error_code || String(raw?.error?.status || 'PROVIDER_ERROR');
+        errorMessage = safeError(raw?.errorMessage || raw?.error?.message || raw?.error);
+        raw = {
+          ...raw,
+          http_status:httpStatus,
+          retry_after_seconds:retryAfterSeconds,
+          retryable,
+          error_type:errorType
+        };
+      } else {
+        transportOk = true;
+      }
+    } catch (error) {
+      const metadata = transportMetadata(error);
       httpStatus = metadata.http_status;
       retryAfterSeconds = metadata.retry_after_seconds;
-      retryable = metadata.retryable;
-      errorType = metadata.error_type;
-      errorCode = metadata.error_code || String(raw?.error?.status || 'PROVIDER_ERROR');
-      errorMessage = safeError(raw?.errorMessage || raw?.error?.message || raw?.error);
+      retryable = retryable || metadata.retryable;
+      errorType = errorType || metadata.error_type;
+      errorCode = errorCode || metadata.error_code;
+      errorMessage = safeError(error);
       raw = {
-        ...raw,
+        error:true,errorMessage,errorCode,
         http_status:httpStatus,
         retry_after_seconds:retryAfterSeconds,
         retryable,
         error_type:errorType
       };
-    } else {
-      transportOk = true;
     }
-  } catch (error) {
-    const metadata = transportMetadata(error);
-    httpStatus = metadata.http_status;
-    retryAfterSeconds = metadata.retry_after_seconds;
-    retryable = retryable || metadata.retryable;
-    errorType = errorType || metadata.error_type;
-    errorCode = errorCode || metadata.error_code;
-    errorMessage = safeError(error);
-    raw = {
-      error:true,errorMessage,errorCode,
-      http_status:httpStatus,
-      retry_after_seconds:retryAfterSeconds,
-      retryable,
-      error_type:errorType
-    };
+
+    if (!transportOk && retryable && providerAttempt < maxProviderAttempts) {
+      const delayMs = Math.min(
+        maxBackoffMs,
+        retryAfterSeconds !== null
+          ? retryAfterSeconds * 1000
+          : Math.floor(baseBackoffMs * Math.pow(2, providerAttempt - 1) + Math.random() * 500)
+      );
+      console.log(`[AI_GATEWAY][BACKOFF] Provedor ${config.role} tentativa ${providerAttempt}/${maxProviderAttempts} falhou (${errorCode || errorType}). Aguardando ${delayMs}ms com backoff exponencial...`);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+      continue;
+    }
+    break;
   }
   const parsedResult = transportOk ? extractParsed(raw) : null;
   const validation = transportOk ? validateRaw(raw, config) : {valid:false,reason:errorMessage};

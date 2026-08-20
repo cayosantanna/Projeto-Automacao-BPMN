@@ -344,6 +344,8 @@ def set_experiment_status(run_id: str, status: str) -> None:
             concluido_em=CASE WHEN %s IN ('CONCLUIDO','FALHOU')
                               THEN NOW() ELSE concluido_em END
         WHERE run_id=%s
+          AND status NOT LIKE 'INVALIDADO%%'
+          AND status NOT LIKE 'EXECUTION_ABORTED%%'
         """,
         (status, status, status, run_id),
     )

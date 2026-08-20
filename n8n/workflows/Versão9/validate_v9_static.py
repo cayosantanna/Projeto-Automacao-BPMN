@@ -10,8 +10,11 @@ from __future__ import annotations
 import json
 import hashlib
 import py_compile
+import subprocess
 import sys
 from pathlib import Path
+
+from helpers import normalize_n8n_env_access
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -256,6 +259,17 @@ def nodes_by_name(workflow: dict) -> dict[str, dict]:
     return {str(node.get("name")): node for node in workflow.get("nodes", [])}
 
 
+def iter_strings(value):
+    if isinstance(value, dict):
+        for item in value.values():
+            yield from iter_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from iter_strings(item)
+    elif isinstance(value, str):
+        yield value
+
+
 def workflow_text(workflow: dict) -> str:
     return json.dumps(workflow, ensure_ascii=False, sort_keys=True)
 
@@ -364,6 +378,14 @@ def validate_json_structure(workflows: dict[str, dict]) -> None:
             check(source in node_set, f"{key} connection source exists: {source}")
             for target in connection_targets(workflow, source):
                 check(target in node_set, f"{key} connection target exists: {target}")
+        for node in workflow.get("nodes", []):
+            for parameter in iter_strings(node.get("parameters", {})):
+                if "process.env" not in parameter:
+                    continue
+                check(
+                    normalize_n8n_env_access(parameter) == parameter,
+                    f"{key}/{node.get('name')} reads $env before process.env",
+                )
 
 
 def validate_v9_rules(workflows: dict[str, dict]) -> None:
@@ -394,8 +416,9 @@ def validate_v9_rules(workflows: dict[str, dict]) -> None:
     wf05_nodes = nodes_by_name(wf05)
     wf02_text = workflow_text(wf02)
 
-    for key in ("WF01", "WF02", "WF03", "WF04", "WF05"):
-        text = workflow_text(workflows[key])
+    for key in ("WF01", "WF02", "WF03", "WF04", "WF05", "WF06"):
+        current_workflow = workflows[key]
+        text = workflow_text(current_workflow)
         if "GLPI_APP_TOKEN" in text:
             check(
                 "GLPI_APP_TOKEN ausente" in text,
@@ -417,11 +440,44 @@ def validate_v9_rules(workflows: dict[str, dict]) -> None:
             f"{key} Code nodes require GLPI_APP_TOKEN before HTTP",
         )
 
+        for node in current_workflow.get("nodes", []):
+            parameters = node.get("parameters", {})
+            header_entries = (
+                parameters.get("headerParameters", {}).get("parameters", [])
+            )
+            for header in header_entries:
+                header_name = header.get("name")
+                header_value = str(header.get("value", ""))
+                if header_name == "App-Token":
+                    check(
+                        "$env.GLPI_APP_TOKEN" in header_value
+                        and "GLPI_APP_TOKEN ausente" in header_value
+                        and "CHANGE_ME" in header_value,
+                        f"{key}/{node.get('name')} App-Token header fails closed",
+                    )
+                if header_name == "Authorization" and "GLPI_AUTH_BASIC" in header_value:
+                    check(
+                        "$env.GLPI_AUTH_BASIC" in header_value
+                        and "GLPI_AUTH_BASIC ausente" in header_value
+                        and "CHANGE_ME" in header_value,
+                        f"{key}/{node.get('name')} GLPI Authorization header fails closed",
+                    )
+
+            js_code = str(parameters.get("jsCode", ""))
+            if "helpers.httpRequest" in js_code and "'App-Token'" in js_code:
+                check(
+                    "GLPI_APP_TOKEN ausente" in js_code
+                    and "GLPI session_token ausente" in js_code,
+                    f"{key}/{node.get('name')} requires GLPI app and session tokens before direct HTTP",
+                )
+
     check(
         "glpi-n8n-ic-2026" not in wf02_text
         and "glpi-n8n-ic-2026" not in workflow_text(wf06)
         and "expectedKey.length > 0" in wf02_text
-        and "expectedKey.length > 0" in workflow_text(wf06),
+        and "expectedKey !== 'CHANGE_ME'" in wf02_text
+        and "expectedKey.length > 0" in workflow_text(wf06)
+        and "expectedKey !== 'CHANGE_ME'" in workflow_text(wf06),
         "WF02/WF06 authenticate ingress only with a non-empty GLPI_WEBHOOK_KEY from env",
     )
 
@@ -789,6 +845,12 @@ def validate_v9_rules(workflows: dict[str, dict]) -> None:
     check("FILA_IA_LOTE_TAMANHO" in wf06_text, "WF06 uses FILA_IA_LOTE_TAMANHO")
     check("FILA_IA_INTERVALO_SEGUNDOS" in wf06_text, "WF06 uses FILA_IA_INTERVALO_SEGUNDOS")
     check("FILA_IA_LEASE_SEGUNDOS" in wf06_text, "WF06 recovers expired queue reservations")
+    check(
+        "FILA_IA_RUN_SCOPE" in wf06_text
+        and "dc.run_id=(SELECT run_scope FROM parametros)" in wf06_text
+        and "OR d.run_id=(SELECT run_scope FROM parametros)" in wf06_text,
+        "WF06 can isolate reservations and experiment context to one calibration run",
+    )
     check("pg_advisory_xact_lock" in wf06_text, "WF06 serializes concurrent schedulers")
     check(
         "bloqueio AS MATERIALIZED" in wf06_text
@@ -939,6 +1001,10 @@ def validate_schema_and_config() -> None:
     for var in REQUIRED_ENV_VARS:
         check(var in n8n_compose, f"n8n docker-compose.yml exposes {var}")
         check(var in n8n_env, f"{env_definition_path.name} defines {var}")
+    check(
+        "FILA_IA_RUN_SCOPE=${FILA_IA_RUN_SCOPE:-}" in n8n_compose,
+        "n8n compose exposes an empty-by-default calibration queue scope",
+    )
     check(":latest" not in n8n_compose, "n8n compose has no mutable latest images")
     check("healthcheck:" in n8n_compose, "PostgreSQL compose has a healthcheck")
     check("condition: service_healthy" in n8n_compose, "n8n waits for healthy PostgreSQL")
@@ -1150,6 +1216,11 @@ def validate_schema_and_config() -> None:
                 f"{workflow_key} uses an environment-configurable audited operational sequence",
             )
             check(
+                "if (role === 'LOCAL') return [...roles];" in gateway_js
+                and "['LOCAL',...roles]" not in gateway_js,
+                f"{workflow_key} fallback chain does not repeat the LOCAL provider",
+            )
+            check(
                 "attempt_input_profiles" in gateway_js
                 and "endpoint:item.endpoint" in gateway_js,
                 f"{workflow_key} audits local endpoint and per-attempt input profile",
@@ -1241,11 +1312,30 @@ def validate_schema_and_config() -> None:
     check("usleep" in hook_php, "GLPI webhook plugin waits between retry attempts")
 
 
+def validate_prompt_manifest_sync() -> None:
+    """Fail closed when generated gateways and the frozen manifest drift apart."""
+    synchronizer = PROJECT_DIR / "avaliacao" / "scripts" / "sincronizar_manifesto.py"
+    result = subprocess.run(
+        [sys.executable, str(synchronizer), "--check"],
+        cwd=PROJECT_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stdout or result.stderr).strip()
+    check(
+        result.returncode == 0,
+        "model, prompt, schema, gateway and workflow hashes match the frozen manifest"
+        + (f" ({detail})" if result.returncode else ""),
+    )
+
+
 def main() -> int:
     validate_python()
     workflows = load_workflows()
     validate_json_structure(workflows)
     validate_v9_rules(workflows)
+    validate_prompt_manifest_sync()
     validate_schema_and_config()
 
     if failures:

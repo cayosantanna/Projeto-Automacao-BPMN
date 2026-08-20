@@ -89,6 +89,9 @@ class HybridBundleRuntime:
         classification_schema = (
             self.bundle.get("feature_schema", {}).get("classification", {})
         )
+        deduplication_schema = self.bundle.get("feature_schema", {}).get(
+            "deduplication"
+        )
         # Bundles anteriores declaravam apenas uma lista de blocos. Eles seguem
         # válidos e, por definição, não contêm os novos atributos estruturados.
         if isinstance(classification_schema, dict):
@@ -114,6 +117,124 @@ class HybridBundleRuntime:
         ):
             raise HybridRuntimeError(
                 "Ordem de atributos estruturados diverge do contrato do runtime"
+            )
+        if deduplication_schema is None:
+            # Compatibilidade com fixtures e bundles legados: antes da v1.9 o
+            # runtime possuía uma única ordem implícita, com os sete metadados
+            # entre TF-IDF e embedding.
+            deduplication_schema = {
+                "layout": [
+                    "tfidf_abs_difference",
+                    "tfidf_elementwise_product",
+                    "tfidf_cosine",
+                    "same_location",
+                    "same_category",
+                    "same_requester",
+                    "both_locations_present",
+                    "both_categories_present",
+                    "urgency_distance",
+                    "impact_distance",
+                    "embedding_abs_difference",
+                    "embedding_elementwise_product",
+                    "embedding_cosine",
+                ]
+            }
+        if isinstance(deduplication_schema, list):
+            legacy_values = tuple(str(value) for value in deduplication_schema)
+            legacy_uses_metadata = "structured" in legacy_values
+            legacy_layout = [
+                "tfidf_abs_difference",
+                "tfidf_elementwise_product",
+                "tfidf_cosine",
+            ]
+            if legacy_uses_metadata:
+                legacy_layout.extend(
+                    [
+                        "same_location",
+                        "same_category",
+                        "same_requester",
+                        "both_locations_present",
+                        "both_categories_present",
+                        "urgency_distance",
+                        "impact_distance",
+                    ]
+                )
+            if any(value.startswith("embedding_") for value in legacy_values):
+                legacy_layout.extend(
+                    [
+                        "embedding_abs_difference",
+                        "embedding_elementwise_product",
+                        "embedding_cosine",
+                    ]
+                )
+            deduplication_schema = {"layout": legacy_layout}
+        if not isinstance(deduplication_schema, dict):
+            raise HybridRuntimeError("Schema de deduplicação do bundle híbrido inválido")
+        raw_layout = deduplication_schema.get("layout", [])
+        if not isinstance(raw_layout, list):
+            raise HybridRuntimeError("Layout de deduplicação do bundle híbrido inválido")
+        layout = tuple(str(value) for value in raw_layout)
+        metadata_names = {
+            "same_location",
+            "same_category",
+            "same_requester",
+            "both_locations_present",
+            "both_categories_present",
+            "urgency_distance",
+            "impact_distance",
+        }
+        inferred_metadata = any(value in metadata_names for value in layout)
+        declared_metadata = deduplication_schema.get("uses_metadata")
+        if declared_metadata is not None and bool(declared_metadata) != inferred_metadata:
+            raise HybridRuntimeError(
+                "Declaração uses_metadata diverge do layout de deduplicação"
+            )
+        self.dedup_uses_metadata = inferred_metadata
+        raw_block_order = deduplication_schema.get("block_order")
+        if raw_block_order is None:
+            positions: list[tuple[int, str]] = []
+            tfidf_position = next(
+                (index for index, value in enumerate(layout) if value.startswith("tfidf_")),
+                None,
+            )
+            embedding_position = next(
+                (
+                    index
+                    for index, value in enumerate(layout)
+                    if value.startswith("embedding_")
+                ),
+                None,
+            )
+            metadata_position = next(
+                (index for index, value in enumerate(layout) if value in metadata_names),
+                None,
+            )
+            if tfidf_position is not None:
+                positions.append((tfidf_position, "tfidf"))
+            if embedding_position is not None:
+                positions.append((embedding_position, "embedding"))
+            if metadata_position is not None:
+                positions.append((metadata_position, "metadata"))
+            self.dedup_block_order = tuple(
+                name for _, name in sorted(positions, key=lambda item: item[0])
+            )
+        else:
+            if not isinstance(raw_block_order, list):
+                raise HybridRuntimeError(
+                    "block_order de deduplicação do bundle híbrido inválido"
+                )
+            self.dedup_block_order = tuple(str(value) for value in raw_block_order)
+        expected_blocks = {"tfidf"}
+        if self.embedding_dimension > 0:
+            expected_blocks.add("embedding")
+        if self.dedup_uses_metadata:
+            expected_blocks.add("metadata")
+        if (
+            set(self.dedup_block_order) != expected_blocks
+            or len(self.dedup_block_order) != len(expected_blocks)
+        ):
+            raise HybridRuntimeError(
+                "Blocos de atributos de deduplicação divergem do contrato do bundle"
             )
         self.classification_threshold = self._threshold("classification")
         raw_obra_threshold = thresholds.get(
@@ -344,27 +465,31 @@ class HybridBundleRuntime:
                 if current_norm and reference_norm
                 else 0.0
             )
-            structured = csr_matrix(
-                [[
-                    self._same(current, reference, ("localizacao", "location")),
-                    self._same(current, reference, ("categoria", "category", "tipo_servico")),
-                    self._same(current, reference, ("email_solicitante", "solicitante", "requester")),
-                    self._both_present(current, reference, ("localizacao", "location")),
-                    self._both_present(current, reference, ("categoria", "category", "tipo_servico")),
-                    self._ordinal_distance(current, reference, ("urgencia", "urgency")),
-                    self._ordinal_distance(current, reference, ("impacto", "impact")),
-                ]]
-            )
-            matrix = hstack(
-                [absolute_difference, product, csr_matrix([[cosine_tfidf]]), structured],
+            tfidf_block = hstack(
+                [absolute_difference, product, csr_matrix([[cosine_tfidf]])],
                 format="csr",
             )
+            structured = None
+            if self.dedup_uses_metadata:
+                structured = csr_matrix(
+                    [[
+                        self._same(current, reference, ("localizacao", "location")),
+                        self._same(current, reference, ("categoria", "category", "tipo_servico")),
+                        self._same(current, reference, ("email_solicitante", "solicitante", "requester")),
+                        self._both_present(current, reference, ("localizacao", "location")),
+                        self._both_present(current, reference, ("categoria", "category", "tipo_servico")),
+                        self._ordinal_distance(current, reference, ("urgencia", "urgency")),
+                        self._ordinal_distance(current, reference, ("impacto", "impact")),
+                    ]]
+                )
             current_embedding_row = self._embedding_row(
                 current_embedding, name="embedding do chamado atual"
             )
             reference_embedding_row = self._embedding_row(
                 reference_embedding, name="embedding do chamado de referência"
             )
+            embedding_block = None
+            embedding_cosine = None
             if current_embedding_row is not None and reference_embedding_row is not None:
                 embedding_difference = abs(
                     current_embedding_row - reference_embedding_row
@@ -373,15 +498,19 @@ class HybridBundleRuntime:
                     reference_embedding_row
                 )
                 embedding_cosine = float(embedding_product.sum())
-                matrix = hstack(
-                    [
-                        matrix,
-                        embedding_difference,
-                        embedding_product,
-                        csr_matrix([[embedding_cosine]]),
-                    ],
+                embedding_block = hstack(
+                    [embedding_difference, embedding_product, csr_matrix([[embedding_cosine]])],
                     format="csr",
                 )
+            blocks = {"tfidf": tfidf_block}
+            if structured is not None:
+                blocks["metadata"] = structured
+            if embedding_block is not None:
+                blocks["embedding"] = embedding_block
+            matrix = hstack(
+                [blocks[name] for name in self.dedup_block_order],
+                format="csr",
+            )
             raw = model.predict_proba(matrix)[0]
         except HybridRuntimeError:
             raise

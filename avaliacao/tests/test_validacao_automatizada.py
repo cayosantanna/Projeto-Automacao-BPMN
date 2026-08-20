@@ -65,6 +65,14 @@ class TestSuficienciaAmostral(unittest.TestCase):
 
 
 class TestSeparacaoDaEvidencia(unittest.TestCase):
+    def test_status_helper_never_overwrites_invalidated_or_aborted_run(self) -> None:
+        with patch.object(checker, "execute") as execute:
+            checker.set_experiment_status("CALQ-INVALIDADO", "FALHOU")
+
+        statement = execute.call_args.args[0]
+        self.assertIn("status NOT LIKE 'INVALIDADO%%'", statement)
+        self.assertIn("status NOT LIKE 'EXECUTION_ABORTED%%'", statement)
+
     def test_automated_validation_never_becomes_confirmatory(self) -> None:
         exp = {
             "split": "VALIDACAO",
@@ -163,6 +171,7 @@ class TestSeparacaoDaEvidencia(unittest.TestCase):
                 self.assertIn("AUTOMATED_VALIDATION", sql)
 
     def test_executor_propagates_fixed_model_role_to_generator_and_manifest(self) -> None:
+        self.assertEqual(runner.MODEL_ROLES, ("LOCAL", "SECONDARY"))
         for role in runner.MODEL_ROLES:
             with self.subTest(role=role):
                 args = SimpleNamespace(
@@ -204,6 +213,34 @@ class TestSeparacaoDaEvidencia(unittest.TestCase):
                     "n8n\\workflows\\Versão9\\V9-WF02-Triagem.json",
                     frozen_files,
                 )
+                self.assertEqual(
+                    manifest["evidence_nature"],
+                    "AUTOMATED_TECHNICAL_NON_CONFIRMATORY",
+                )
+                self.assertFalse(manifest["oracle_is_human_review"])
+                self.assertFalse(manifest["confirmatory_eligible"])
+
+    def test_executor_blocks_confirmatory_benchmark_before_side_effects(self) -> None:
+        args = SimpleNamespace(fase="benchmark", model_role="LOCAL")
+        with patch.object(runner, "parse_args", return_value=args), patch.object(
+            runner, "run"
+        ) as run, patch.object(
+            runner, "require_quiescent_queue"
+        ) as queue:
+            with self.assertRaisesRegex(
+                SystemExit, "BENCHMARK_CONFIRMATORIO_BLOQUEADO"
+            ):
+                runner.main()
+        run.assert_not_called()
+        queue.assert_not_called()
+
+    def test_executor_rejects_historical_primary_role(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "Papel não executável"):
+            runner.require_supported_route("validacao", "PRIMARY")
+
+    def test_executor_does_not_request_synthetic_gold_twice(self) -> None:
+        source = (SCRIPTS / "executar_avaliacao.py").read_text(encoding="utf-8")
+        self.assertNotIn('"--registrar-gabarito"', source)
 
     def test_benchmark_also_records_one_fixed_model_and_disables_fallback(self) -> None:
         args = SimpleNamespace(

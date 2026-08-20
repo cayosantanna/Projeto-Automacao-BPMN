@@ -20,7 +20,7 @@ from helpers import (
 
 DIR = Path(__file__).resolve().parent
 OUTPUT = DIR / "V9-WF06-Fila-IA.json"
-SNAPSHOT_SHA256 = "c0b1e08ac51cda1633dcd72b6c7aa610c9fa308ba0aeadb2b7ba490ac1f68448"
+SNAPSHOT_SHA256 = "1c6c07b857c8a676bc761b827404f4d0836271fa2b968b484f2d3c43c6c94070"
 
 
 def schedule_trigger():
@@ -119,7 +119,7 @@ const receivedKey = String(
   headers['x-glpi-webhook-key'] || ''
 );
 const id = Number(body.ticket_id ?? body.items_id ?? body.id);
-const authorized = expectedKey.length > 0 && receivedKey === expectedKey;
+const authorized = expectedKey.length > 0 && expectedKey !== 'CHANGE_ME' && receivedKey === expectedKey;
 if (!authorized) {
   console.log('[WF06][LOG] Ingresso GLPI não autorizado ticket=' + (id || 'N/A'));
   return [{json:{authorized:false, erro:true, codigo_http:401, mensagem:'Não autorizado'}}];
@@ -244,32 +244,65 @@ RETURNING id,triagem_status,(triagem_status='PENDENTE_FILA_IA') AS enfileirado;
 
 
 SELECIONAR_QUERY = r"""{{ (() => {
-const loteRaw = Number((typeof process !== 'undefined' && process.env.FILA_IA_LOTE_TAMANHO) || 3);
-const intervaloRaw = Number((typeof process !== 'undefined' && process.env.FILA_IA_INTERVALO_SEGUNDOS) || 45);
-const leaseRaw = Number((typeof process !== 'undefined' && process.env.FILA_IA_LEASE_SEGUNDOS) || 900);
-const graceRaw = Number((typeof process !== 'undefined' && process.env.FILA_IA_INGRESS_GRACE_SEGUNDOS) || 10);
+const envValue=name=>{
+  let value='';
+  try { value=String((typeof $env!=='undefined' && $env[name]) || ''); } catch(e) {}
+  if (!value) {
+    try { value=String((typeof process!=='undefined' && process.env[name]) || ''); } catch(e) {}
+  }
+  return value.trim();
+};
+const loteRaw = Number(envValue('FILA_IA_LOTE_TAMANHO') || 3);
+const loteMinRaw = Number(envValue('FILA_IA_LOTE_MIN') || 1);
+const loteMaxRaw = Number(envValue('FILA_IA_LOTE_MAX') || 5);
+const adaptive = ['1','true','yes','on','sim'].includes(envValue('FILA_IA_RATE_LIMIT_ADAPTATIVO').toLowerCase());
+const intervaloRaw = Number(envValue('FILA_IA_INTERVALO_SEGUNDOS') || 45);
+const leaseRaw = Number(envValue('FILA_IA_LEASE_SEGUNDOS') || 900);
+const graceRaw = Number(envValue('FILA_IA_INGRESS_GRACE_SEGUNDOS') || 10);
+const runScope = envValue('FILA_IA_RUN_SCOPE');
+if (runScope && !/^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/.test(runScope)) {
+  throw new Error('FILA_IA_RUN_SCOPE inválido');
+}
+const runScopeSql = runScope ? "'" + runScope.replace(/'/g,"''") + "'" : 'NULL';
 const lote = Number.isFinite(loteRaw) && loteRaw > 0 ? Math.min(50,Math.floor(loteRaw)) : 3;
+const loteMin = Number.isFinite(loteMinRaw) && loteMinRaw > 0 ? Math.min(10,Math.floor(loteMinRaw)) : 1;
+const loteMax = Number.isFinite(loteMaxRaw) && loteMaxRaw >= loteMin ? Math.min(50,Math.floor(loteMaxRaw)) : 5;
 const intervalo = Number.isFinite(intervaloRaw) && intervaloRaw >= 0 ? Math.min(600,Math.floor(intervaloRaw)) : 45;
 const lease = Number.isFinite(leaseRaw) && leaseRaw >= 60 ? Math.min(86400,Math.floor(leaseRaw)) : 900;
 const grace = Number.isFinite(graceRaw) && graceRaw >= 0 ? Math.min(300,Math.floor(graceRaw)) : 10;
-const log = JSON.stringify({wf:'WF06',acao:'RESERVAR_FILA',lote,intervalo,lease,ts:new Date().toISOString()}).replace(/'/g,"''");
+const log = JSON.stringify({wf:'WF06',acao:'RESERVAR_FILA',lote,lote_min:loteMin,lote_max:loteMax,adaptativo:adaptive,intervalo,lease,run_scope:runScope||null,ts:new Date().toISOString()}).replace(/'/g,"''");
 return `
 WITH
+parametros AS MATERIALIZED (
+  SELECT ${runScopeSql}::text AS run_scope
+),
+escopo_ids AS MATERIALIZED (
+  SELECT DISTINCT dc.ticket_id
+  FROM dataset_controle dc
+  CROSS JOIN parametros p
+  WHERE p.run_scope IS NOT NULL
+    AND dc.run_id=p.run_scope
+    AND dc.ticket_id IS NOT NULL
+),
 bloqueio AS MATERIALIZED (
   SELECT pg_advisory_xact_lock(9062026) AS adquirido
 ),
 reservas_expiradas AS (
-  UPDATE tickets_processados
+  UPDATE tickets_processados t
   SET triagem_status='PENDENTE_FILA_IA',
       fila_liberar_em=NULL,
       fila_reservada_em=NULL,
       fila_ultimo_erro='Reserva expirada; reenfileirado pelo WF06',
       ultima_acao_workflow='WF06_REENFILEIROU_RESERVA_EXPIRADA',
       atualizado_em=NOW()
-  WHERE triagem_status='FILA_IA_LIBERADA'
-    AND COALESCE(fila_liberar_em,fila_reservada_em,atualizado_em)
+  WHERE t.triagem_status='FILA_IA_LIBERADA'
+    AND COALESCE(t.fila_liberar_em,t.fila_reservada_em,t.atualizado_em)
         + (${lease} || ' seconds')::interval < NOW()
-  RETURNING id
+    AND (
+      (SELECT run_scope FROM parametros) IS NULL
+      OR EXISTS (SELECT 1 FROM escopo_ids s WHERE s.ticket_id=t.id)
+    )
+  RETURNING t.id
 ),
 controle AS (
   SELECT id,GREATEST(COALESCE(proxima_liberacao_em,NOW()),NOW()) AS base
@@ -278,10 +311,28 @@ controle AS (
   WHERE id=1
   FOR UPDATE
 ),
+lote_efetivo AS (
+  SELECT CASE
+    WHEN ${adaptive ? 'TRUE' : 'FALSE'} THEN
+      CASE
+        WHEN (SELECT AVG(COALESCE((output_normalizado->>'elapsed_ms')::numeric, 150)) FROM ia_decisoes WHERE criado_em >= NOW() - INTERVAL '5 minutes') > 600
+             OR (SELECT COUNT(*) FROM fila_ia_dead_letter WHERE criado_em >= NOW() - INTERVAL '5 minutes') > 0
+          THEN ${loteMin}
+        WHEN (SELECT AVG(COALESCE((output_normalizado->>'elapsed_ms')::numeric, 150)) FROM ia_decisoes WHERE criado_em >= NOW() - INTERVAL '5 minutes') < 250
+          THEN ${loteMax}
+        ELSE ${lote}
+      END
+    ELSE ${lote}
+  END AS tamanho
+),
 capacidade AS (
-  SELECT GREATEST(${lote} - COUNT(*)::int,0)::int AS slots
-  FROM tickets_processados
-  WHERE triagem_status='FILA_IA_LIBERADA'
+  SELECT GREATEST((SELECT tamanho FROM lote_efetivo) - COUNT(*)::int,0)::int AS slots
+  FROM tickets_processados t
+  WHERE t.triagem_status='FILA_IA_LIBERADA'
+    AND (
+      (SELECT run_scope FROM parametros) IS NULL
+      OR EXISTS (SELECT 1 FROM escopo_ids s WHERE s.ticket_id=t.id)
+    )
 ),
 travados AS (
   SELECT t.id,COALESCE(t.data_abertura,t.criado_em) AS ordem_data
@@ -302,16 +353,32 @@ travados AS (
         <= NOW() - (${grace} || ' seconds')::interval
     AND COALESCE(t.fila_disponivel_em,t.fila_enfileirada_em,t.criado_em) <= NOW()
     AND (
-      NOT EXISTS (
-        SELECT 1 FROM dataset_controle dc
-        WHERE dc.ticket_id=t.id AND dc.run_id IS NOT NULL
+      (
+        (SELECT run_scope FROM parametros) IS NOT NULL
+        AND EXISTS (
+          SELECT 1
+          FROM dataset_controle dc
+          JOIN experimentos_avaliacao e ON e.run_id=dc.run_id
+          WHERE dc.ticket_id=t.id
+            AND dc.run_id=(SELECT run_scope FROM parametros)
+            AND e.status IN ('EXECUTANDO','CALIBRANDO')
+        )
       )
-      OR EXISTS (
-        SELECT 1
-        FROM dataset_controle dc
-        JOIN experimentos_avaliacao e ON e.run_id=dc.run_id
-        WHERE dc.ticket_id=t.id
-          AND e.status IN ('EXECUTANDO','CALIBRANDO')
+      OR (
+        (SELECT run_scope FROM parametros) IS NULL
+        AND (
+          NOT EXISTS (
+            SELECT 1 FROM dataset_controle dc
+            WHERE dc.ticket_id=t.id AND dc.run_id IS NOT NULL
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM dataset_controle dc
+            JOIN experimentos_avaliacao e ON e.run_id=dc.run_id
+            WHERE dc.ticket_id=t.id
+              AND e.status IN ('EXECUTANDO','CALIBRANDO')
+          )
+        )
       )
     )
   ORDER BY COALESCE(t.data_abertura,t.criado_em),t.id
@@ -362,18 +429,41 @@ metricas AS (
     espera_p95_segundos,intervalo_segundos,lote_tamanho
   )
   SELECT
-    CASE
-      WHEN COUNT(DISTINCT COALESCE(dc.run_id,'__OPERACIONAL__'))=1
-      THEN MAX(dc.run_id)
-      ELSE NULL
-    END,
-    (SELECT COUNT(*)::int FROM tickets_processados WHERE triagem_status='PENDENTE_FILA_IA'),
-    (SELECT COUNT(*)::int FROM tickets_processados WHERE triagem_status='FILA_IA_LIBERADA'),
+    COALESCE(
+      (SELECT run_scope FROM parametros),
+      CASE
+        WHEN COUNT(DISTINCT COALESCE(dc.run_id,'__OPERACIONAL__'))=1
+        THEN MAX(dc.run_id)
+        ELSE NULL
+      END
+    ),
+    (
+      SELECT COUNT(*)::int
+      FROM tickets_processados t
+      WHERE t.triagem_status='PENDENTE_FILA_IA'
+        AND (
+          (SELECT run_scope FROM parametros) IS NULL
+          OR EXISTS (SELECT 1 FROM escopo_ids s WHERE s.ticket_id=t.id)
+        )
+    ),
+    (
+      SELECT COUNT(*)::int
+      FROM tickets_processados t
+      WHERE t.triagem_status='FILA_IA_LIBERADA'
+        AND (
+          (SELECT run_scope FROM parametros) IS NULL
+          OR EXISTS (SELECT 1 FROM escopo_ids s WHERE s.ticket_id=t.id)
+        )
+    ),
     (SELECT COUNT(*)::int FROM marcados),
     (
       SELECT AVG(EXTRACT(EPOCH FROM (NOW()-COALESCE(t.fila_enfileirada_em,t.criado_em))))
       FROM tickets_processados t
       WHERE t.triagem_status IN ('PENDENTE_FILA_IA','FILA_IA_LIBERADA')
+        AND (
+          (SELECT run_scope FROM parametros) IS NULL
+          OR EXISTS (SELECT 1 FROM escopo_ids s WHERE s.ticket_id=t.id)
+        )
     ),
     (
       SELECT percentile_cont(0.95) WITHIN GROUP (
@@ -381,11 +471,19 @@ metricas AS (
       )
       FROM tickets_processados t
       WHERE t.triagem_status IN ('PENDENTE_FILA_IA','FILA_IA_LIBERADA')
+        AND (
+          (SELECT run_scope FROM parametros) IS NULL
+          OR EXISTS (SELECT 1 FROM escopo_ids s WHERE s.ticket_id=t.id)
+        )
     ),
     ${intervalo},${lote}
   FROM (SELECT 1) base
   LEFT JOIN marcados m ON TRUE
   LEFT JOIN dataset_controle dc ON dc.ticket_id=m.id
+    AND (
+      (SELECT run_scope FROM parametros) IS NULL
+      OR dc.run_id=(SELECT run_scope FROM parametros)
+    )
   RETURNING id
 ),
 contextualizados AS (
@@ -409,6 +507,10 @@ contextualizados AS (
     SELECT d.run_id,d.split
     FROM dataset_controle d
     WHERE d.ticket_id=m.id
+      AND (
+        (SELECT run_scope FROM parametros) IS NULL
+        OR d.run_id=(SELECT run_scope FROM parametros)
+      )
     ORDER BY d.id DESC
     LIMIT 1
   ) dc ON TRUE
@@ -436,13 +538,14 @@ if (typeof tickets === 'string') {
   try { tickets = JSON.parse(tickets); } catch { tickets = []; }
 }
 if (!Array.isArray(tickets)) tickets = [];
-let webhookKey = '';
-try {
-  webhookKey = String(
+const webhookKey = (() => {
+  const value = String(
     (typeof $env !== 'undefined' && $env.GLPI_WEBHOOK_KEY) ||
     (typeof process !== 'undefined' && process.env.GLPI_WEBHOOK_KEY) || ''
-  );
-} catch(e) {}
+  ).trim();
+  if (!value || value === 'CHANGE_ME') throw new Error('GLPI_WEBHOOK_KEY ausente');
+  return value;
+})();
 console.log('[WF06][LOG] Reservas liberadas no ciclo=' + tickets.length);
 if (tickets.length === 0) return [{json:{total_lote:0}}];
 return tickets.map((chamado,index) => ({
