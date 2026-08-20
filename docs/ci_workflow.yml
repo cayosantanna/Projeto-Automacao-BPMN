@@ -1,0 +1,49 @@
+name: CI / Automated Integrity & Testing
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate-and-test:
+    name: Lint, Static Security & Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r local_ai/requirements-hybrid.txt
+          pip install pytest
+
+      - name: Verify No Secrets / .env files are tracked
+        run: |
+          if git ls-files | grep -E '^(\.env|\.env\.local|n8n/\.env|glpi/\.env)$'; then
+            echo "ERRO CRITICO: Arquivos .env reais estao rastreados no Git!"
+            exit 1
+          fi
+          echo "Secret check passed: No live .env tracked."
+
+      - name: Run Static Security & Workflow Integrity Validation
+        run: |
+          python n8n/workflows/Versão9/validate_v9_static.py
+
+      - name: Run Local AI Unit & Contract Tests
+        run: |
+          python -m pytest local_ai/tests/ -v
+
+      - name: Run Scientific Evaluation Test Suite
+        run: |
+          python -m pytest avaliacao/tests/ -v -k "not test_integracao_e2e_real and not test_validar_pipeline_fila_e2e"
