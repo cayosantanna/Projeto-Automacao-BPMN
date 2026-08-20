@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  glpi-dedup-db:
+    image: postgres:16
+    container_name: glpi-dedup-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=triagem
+      - POSTGRES_USER=triagem_user
+      - POSTGRES_PASSWORD=TriagemPass2026!
+      - TZ=America/Sao_Paulo
+    ports:
+      - '5432:5432'
+    volumes:
+      - glpi-dedup-db-data:/var/lib/postgresql/data
+      - '../Banco de dados chamados/init_schema.sql:/docker-entrypoint-initdb.d/init_schema.sql:ro'
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+    ports:
+      - '5678:5678'  
+#http://localhost:5678
+#USER: adm@mail.com
+#PASS: Adm2026.
+
+    environment:
+      - GENERIC_TIMEZONE=America/Sao_Paulo # fuso horário do n8n para logs e timestamps corretos
+      # TZ fuso horário do sistema operacional do container (timestamps e agendamentos corretos)
+      - TZ=America/Sao_Paulo
+      - N8N_RUNNERS_ENABLED=false
+      - N8N_SECURE_COOKIE=false
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=adm@mail.com
+      - N8N_BASIC_AUTH_PASSWORD=Adm2026.
+      - GEMINI_API_KEY=AIzaSyDD4-vlQuKbBxCAEwNYKTMQt2DVBx5i6j4
+      - FISCAL_DECISION_BASE_URL=http://localhost:5678/webhook/fiscal-decisao
+
+    volumes:
+    #n8n-data armazena: Workflows, credenciais, histórico de execuções e configurações da aplicação
+        - n8n-data:/home/node/.n8n
+
+    extra_hosts:
+      - 'host.docker.internal:host-gateway' # permite que o n8n se comunique com serviços rodando no host 
+
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: mailpit
+    restart: unless-stopped
+    ports:
+      - '1025:1025'  # SMTP
+      - '8025:8025'  # UI Web
+
+
+volumes:
+  glpi-dedup-db-data:
+  n8n-data:

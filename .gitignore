@@ -1,15 +1,3 @@
-# Segredos e configuracoes locais
-.env
-.env.*
-.env.local
-api_key.txt
-**/api_key.txt
-!.env.example
-!**/.env.example
-!**/.env.local.example
-**/.env
-**/.env.*
-
 # Artefatos reproduziveis do Python
 __pycache__/
 **/__pycache__/
@@ -20,33 +8,17 @@ __pycache__/
 .coverage
 htmlcov/
 
-# Ambientes locais e saidas transitorias
-.agents/
-.codex/
-.agentes/
-.codex/
+# Ambientes locais e binarios pesados (> 100MB)
 .venv/
 venv/
-playwright-report/
-test-results/
-*.tmp
-*.bak
-*~
 *.sqlite
 *.sqlite-*
 *.sqlite3
 *.sqlite3-*
 *.db
 *.db-*
-*.log
-*.pid
-*.pid.*
-
-# Copias de seguranca locais e bases binarias
-backups/
-
-# Modelos e binarios grandes obtidos de fontes publicas (baixados via script)
+backups/n8n/n8n_db.sqlite*
 local_ai/models/**
 !local_ai/models/manifest.json
-local_ai/runtime/**
+
 
