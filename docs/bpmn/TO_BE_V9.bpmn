@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  id="Definitions_TO_BE_V9"
+                  targetNamespace="http://bpmn.io/schema/bpmn"
+                  exporter="Camunda Modeler"
+                  exporterVersion="5.0.0">
+  <bpmn:collaboration id="Collaboration_TO_BE_V9">
+    <bpmn:participant id="Participant_GLPI" name="Helpdesk GLPI" processRef="Process_GLPI" />
+    <bpmn:participant id="Participant_Automation" name="Automação Híbrida V9 (n8n + PostgreSQL + Local AI)" processRef="Process_Automation_V9" />
+    <bpmn:participant id="Participant_Fiscal" name="Fiscal Humano (Human-in-the-Loop)" processRef="Process_Fiscal" />
+    <bpmn:messageFlow id="MsgFlow_Webhook" name="HTTP Post Webhook" sourceRef="Task_GLPI_Webhook" targetRef="Start_WF06" />
+    <bpmn:messageFlow id="MsgFlow_UpdateGLPI" name="API Rest / ITILFollowup" sourceRef="Task_WF04_Update" targetRef="Task_GLPI_ReceiveUpdate" />
+    <bpmn:messageFlow id="MsgFlow_ManualTask" name="Fila de Triagem Manual" sourceRef="Task_WF04_Manual" targetRef="Task_Fiscal_Manual" />
+  </bpmn:collaboration>
+
+  <bpmn:process id="Process_GLPI" isExecutable="false">
+    <bpmn:startEvent id="Start_Ticket_GLPI" name="Chamado Aberto">
+      <bpmn:outgoing>Flow_G1</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:serviceTask id="Task_GLPI_Webhook" name="Disparar Webhook para WF06">
+      <bpmn:incoming>Flow_G1</bpmn:incoming>
+      <bpmn:outgoing>Flow_G2</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:intermediateCatchEvent id="Task_GLPI_ReceiveUpdate" name="Receber Atualização de Status">
+      <bpmn:incoming>Flow_G2</bpmn:incoming>
+      <bpmn:outgoing>Flow_G3</bpmn:outgoing>
+    </bpmn:intermediateCatchEvent>
+    <bpmn:endEvent id="End_GLPI" name="Chamado em Atendimento / Fechado">
+      <bpmn:incoming>Flow_G3</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="Flow_G1" sourceRef="Start_Ticket_GLPI" targetRef="Task_GLPI_Webhook" />
+    <bpmn:sequenceFlow id="Flow_G2" sourceRef="Task_GLPI_Webhook" targetRef="Task_GLPI_ReceiveUpdate" />
+    <bpmn:sequenceFlow id="Flow_G3" sourceRef="Task_GLPI_ReceiveUpdate" targetRef="End_GLPI" />
+  </bpmn:process>
+
+  <bpmn:process id="Process_Automation_V9" isExecutable="true">
+    <bpmn:laneSet id="LaneSet_Automation">
+      <bpmn:lane id="Lane_WF06" name="WF06: Fila IA &amp; Ingress">
+        <bpmn:flowNodeRef>Start_WF06</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_Enfileirar_PG</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_WF06_Dispatch</bpmn:flowNodeRef>
+      </bpmn:lane>
+      <bpmn:lane id="Lane_WF02" name="WF02: Deduplicação Híbrida">
+        <bpmn:flowNodeRef>Task_WF02_Retrieval</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Gateway_Dedup</bpmn:flowNodeRef>
+      </bpmn:lane>
+      <bpmn:lane id="Lane_WF03" name="WF03: Classificação IA">
+        <bpmn:flowNodeRef>Task_WF03_Gates</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Gateway_Gates</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_WF03_LocalInfer</bpmn:flowNodeRef>
+      </bpmn:lane>
+      <bpmn:lane id="Lane_WF04" name="WF04: Decisão Fiscal &amp; GLPI">
+        <bpmn:flowNodeRef>Task_WF04_Update</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_WF04_Manual</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>End_Auto_Success</bpmn:flowNodeRef>
+      </bpmn:lane>
+    </bpmn:laneSet>
+
+    <bpmn:startEvent id="Start_WF06" name="Webhook Recebido">
+      <bpmn:outgoing>Flow_A1</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:serviceTask id="Task_Enfileirar_PG" name="Persistir na Fila (PostgreSQL SKIP LOCKED)">
+      <bpmn:incoming>Flow_A1</bpmn:incoming>
+      <bpmn:outgoing>Flow_A2</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="Task_WF06_Dispatch" name="Despachar para Etapa Pendente">
+      <bpmn:incoming>Flow_A2</bpmn:incoming>
+      <bpmn:outgoing>Flow_A3</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="Task_WF02_Retrieval" name="Top-20 Retrieval + Classificador de Pares">
+      <bpmn:incoming>Flow_A3</bpmn:incoming>
+      <bpmn:outgoing>Flow_A4</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="Gateway_Dedup" name="Decisão Deduplicação">
+      <bpmn:incoming>Flow_A4</bpmn:incoming>
+      <bpmn:outgoing>Flow_Dedup_Sim</bpmn:outgoing>
+      <bpmn:outgoing>Flow_Dedup_Nao</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:serviceTask id="Task_WF03_Gates" name="Avaliar Gates Determinísticos">
+      <bpmn:incoming>Flow_Dedup_Nao</bpmn:incoming>
+      <bpmn:outgoing>Flow_A5</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="Gateway_Gates" name="Informação Suficiente &amp; Sem Contradição?">
+      <bpmn:incoming>Flow_A5</bpmn:incoming>
+      <bpmn:outgoing>Flow_Gates_Pass</bpmn:outgoing>
+      <bpmn:outgoing>Flow_Gates_Abstain</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:serviceTask id="Task_WF03_LocalInfer" name="Inferência Local (Granite 97M + TF-IDF)">
+      <bpmn:incoming>Flow_Gates_Pass</bpmn:incoming>
+      <bpmn:outgoing>Flow_A6</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="Task_WF04_Update" name="Atualizar GLPI e Enviar E-mail">
+      <bpmn:incoming>Flow_Dedup_Sim</bpmn:incoming>
+      <bpmn:incoming>Flow_A6</bpmn:incoming>
+      <bpmn:outgoing>Flow_End_Auto</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="Task_WF04_Manual" name="Encaminhar para Triagem Manual (Abstenção Segura)">
+      <bpmn:incoming>Flow_Gates_Abstain</bpmn:incoming>
+      <bpmn:outgoing>Flow_End_Manual</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:endEvent id="End_Auto_Success" name="Fluxo de Automação Concluído">
+      <bpmn:incoming>Flow_End_Auto</bpmn:incoming>
+      <bpmn:incoming>Flow_End_Manual</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:sequenceFlow id="Flow_A1" sourceRef="Start_WF06" targetRef="Task_Enfileirar_PG" />
+    <bpmn:sequenceFlow id="Flow_A2" sourceRef="Task_Enfileirar_PG" targetRef="Task_WF06_Dispatch" />
+    <bpmn:sequenceFlow id="Flow_A3" sourceRef="Task_WF06_Dispatch" targetRef="Task_WF02_Retrieval" />
+    <bpmn:sequenceFlow id="Flow_A4" sourceRef="Task_WF02_Retrieval" targetRef="Gateway_Dedup" />
+    <bpmn:sequenceFlow id="Flow_Dedup_Sim" name="Duplicado" sourceRef="Gateway_Dedup" targetRef="Task_WF04_Update" />
+    <bpmn:sequenceFlow id="Flow_Dedup_Nao" name="Não Duplicado" sourceRef="Gateway_Dedup" targetRef="Task_WF03_Gates" />
+    <bpmn:sequenceFlow id="Flow_A5" sourceRef="Task_WF03_Gates" targetRef="Gateway_Gates" />
+    <bpmn:sequenceFlow id="Flow_Gates_Pass" name="Aprovado" sourceRef="Gateway_Gates" targetRef="Task_WF03_LocalInfer" />
+    <bpmn:sequenceFlow id="Flow_Gates_Abstain" name="Abstenção" sourceRef="Gateway_Gates" targetRef="Task_WF04_Manual" />
+    <bpmn:sequenceFlow id="Flow_A6" sourceRef="Task_WF03_LocalInfer" targetRef="Task_WF04_Update" />
+    <bpmn:sequenceFlow id="Flow_End_Auto" sourceRef="Task_WF04_Update" targetRef="End_Auto_Success" />
+    <bpmn:sequenceFlow id="Flow_End_Manual" sourceRef="Task_WF04_Manual" targetRef="End_Auto_Success" />
+  </bpmn:process>
+
+  <bpmn:process id="Process_Fiscal" isExecutable="false">
+    <bpmn:userTask id="Task_Fiscal_Manual" name="Análise Manual de Casos Ambíguos / Abstidos">
+      <bpmn:outgoing>Flow_F1</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:endEvent id="End_Fiscal" name="Decisão Manual Registrada">
+      <bpmn:incoming>Flow_F1</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="Flow_F1" sourceRef="Task_Fiscal_Manual" targetRef="End_Fiscal" />
+  </bpmn:process>
+</bpmn:definitions>

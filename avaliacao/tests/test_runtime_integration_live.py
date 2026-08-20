@@ -1,9 +1,9 @@
 """
-Teste de Integração End-to-End (E2E) Real do Pipeline de Automação GLPI.
+Smoke test de integração HTTP/DB em tempo de execução.
 
-Este teste NÃO UTILIZA MOCKS. Ele realiza requisições HTTP reais contra o
-webhook do n8n (WF06 Fila IA), verifica o acionamento do container local de IA,
-e consulta diretamente as tabelas do PostgreSQL para auditar o processamento.
+Verifica a conectividade HTTP real contra o webhook do n8n (WF06 Fila IA) e a
+persistência básica de tabelas no PostgreSQL. Não constitui E2E completo do
+GLPI nem validação científica confirmatória.
 """
 
 from __future__ import annotations

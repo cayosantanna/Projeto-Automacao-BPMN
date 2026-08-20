@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  id="Definitions_AS_IS"
+                  targetNamespace="http://bpmn.io/schema/bpmn"
+                  exporter="Camunda Modeler"
+                  exporterVersion="5.0.0">
+  <bpmn:collaboration id="Collaboration_AS_IS">
+    <bpmn:participant id="Participant_Solicitante" name="Solicitante (Usuário / Servidor)" processRef="Process_Solicitante" />
+    <bpmn:participant id="Participant_GLPI_Manual" name="Processo Manual de Atendimento GLPI (AS-IS)" processRef="Process_AS_IS" />
+    <bpmn:messageFlow id="Flow_Msg_1" sourceRef="Task_Criar_Chamado" targetRef="StartEvent_Chamado_Criado" />
+  </bpmn:collaboration>
+  
+  <bpmn:process id="Process_Solicitante" isExecutable="false">
+    <bpmn:startEvent id="Start_Solicitante" name="Necessidade de Manutenção">
+      <bpmn:outgoing>Flow_S1</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:userTask id="Task_Criar_Chamado" name="Abrir Chamado no GLPI">
+      <bpmn:incoming>Flow_S1</bpmn:incoming>
+      <bpmn:outgoing>Flow_S2</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:endEvent id="End_Solicitante" name="Chamado Aberto">
+      <bpmn:incoming>Flow_S2</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="Flow_S1" sourceRef="Start_Solicitante" targetRef="Task_Criar_Chamado" />
+    <bpmn:sequenceFlow id="Flow_S2" sourceRef="Task_Criar_Chamado" targetRef="End_Solicitante" />
+  </bpmn:process>
+
+  <bpmn:process id="Process_AS_IS" isExecutable="false">
+    <bpmn:laneSet id="LaneSet_AS_IS">
+      <bpmn:lane id="Lane_Fiscal" name="Fiscal / Atendente de Triagem">
+        <bpmn:flowNodeRef>StartEvent_Chamado_Criado</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_Verificar_Fila</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Gateway_Duplicado</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_Vincular_Duplicado</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_Analisar_Escopo</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Gateway_Tipo_Servico</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_Encaminhar_OBRA</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_Encaminhar_DEMO</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_Encaminhar_SOB_DEMANDA</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>End_Finalizado</bpmn:flowNodeRef>
+      </bpmn:lane>
+    </bpmn:laneSet>
+
+    <bpmn:startEvent id="StartEvent_Chamado_Criado" name="Chamado Entra em Fila Única (Status: Novo)">
+      <bpmn:outgoing>Flow_1</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:userTask id="Task_Verificar_Fila" name="Ler Chamado e Verificar Duplicidades">
+      <bpmn:incoming>Flow_1</bpmn:incoming>
+      <bpmn:outgoing>Flow_2</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:exclusiveGateway id="Gateway_Duplicado" name="É Duplicado?">
+      <bpmn:incoming>Flow_2</bpmn:incoming>
+      <bpmn:outgoing>Flow_Dup_Sim</bpmn:outgoing>
+      <bpmn:outgoing>Flow_Dup_Nao</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:userTask id="Task_Vincular_Duplicado" name="Vincular a Chamado Pai e Fechar">
+      <bpmn:incoming>Flow_Dup_Sim</bpmn:incoming>
+      <bpmn:outgoing>Flow_End_Dup</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:userTask id="Task_Analisar_Escopo" name="Classificar Categoria e Definir Executor">
+      <bpmn:incoming>Flow_Dup_Nao</bpmn:incoming>
+      <bpmn:outgoing>Flow_3</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:exclusiveGateway id="Gateway_Tipo_Servico" name="Executor Adequado">
+      <bpmn:incoming>Flow_3</bpmn:incoming>
+      <bpmn:outgoing>Flow_Obra</bpmn:outgoing>
+      <bpmn:outgoing>Flow_Demo</bpmn:outgoing>
+      <bpmn:outgoing>Flow_SobDemanda</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:userTask id="Task_Encaminhar_OBRA" name="Encaminhar para DDI/DG (Obras)">
+      <bpmn:incoming>Flow_Obra</bpmn:incoming>
+      <bpmn:outgoing>Flow_End_1</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:userTask id="Task_Encaminhar_DEMO" name="Atribuir à Equipe DEMO (Manutenção Interna)">
+      <bpmn:incoming>Flow_Demo</bpmn:incoming>
+      <bpmn:outgoing>Flow_End_2</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:userTask id="Task_Encaminhar_SOB_DEMANDA" name="Encaminhar Contrato Especializado">
+      <bpmn:incoming>Flow_SobDemanda</bpmn:incoming>
+      <bpmn:outgoing>Flow_End_3</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:endEvent id="End_Finalizado" name="Chamado Triado Manualmente">
+      <bpmn:incoming>Flow_End_Dup</bpmn:incoming>
+      <bpmn:incoming>Flow_End_1</bpmn:incoming>
+      <bpmn:incoming>Flow_End_2</bpmn:incoming>
+      <bpmn:incoming>Flow_End_3</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:sequenceFlow id="Flow_1" sourceRef="StartEvent_Chamado_Criado" targetRef="Task_Verificar_Fila" />
+    <bpmn:sequenceFlow id="Flow_2" sourceRef="Task_Verificar_Fila" targetRef="Gateway_Duplicado" />
+    <bpmn:sequenceFlow id="Flow_Dup_Sim" sourceRef="Gateway_Duplicado" targetRef="Task_Vincular_Duplicado" />
+    <bpmn:sequenceFlow id="Flow_Dup_Nao" sourceRef="Gateway_Duplicado" targetRef="Task_Analisar_Escopo" />
+    <bpmn:sequenceFlow id="Flow_End_Dup" sourceRef="Task_Vincular_Duplicado" targetRef="End_Finalizado" />
+    <bpmn:sequenceFlow id="Flow_3" sourceRef="Task_Analisar_Escopo" targetRef="Gateway_Tipo_Servico" />
+    <bpmn:sequenceFlow id="Flow_Obra" sourceRef="Gateway_Tipo_Servico" targetRef="Task_Encaminhar_OBRA" />
+    <bpmn:sequenceFlow id="Flow_Demo" sourceRef="Gateway_Tipo_Servico" targetRef="Task_Encaminhar_DEMO" />
+    <bpmn:sequenceFlow id="Flow_SobDemanda" sourceRef="Gateway_Tipo_Servico" targetRef="Task_Encaminhar_SOB_DEMANDA" />
+    <bpmn:sequenceFlow id="Flow_End_1" sourceRef="Task_Encaminhar_OBRA" targetRef="End_Finalizado" />
+    <bpmn:sequenceFlow id="Flow_End_2" sourceRef="Task_Encaminhar_DEMO" targetRef="End_Finalizado" />
+    <bpmn:sequenceFlow id="Flow_End_3" sourceRef="Task_Encaminhar_SOB_DEMANDA" targetRef="End_Finalizado" />
+  </bpmn:process>
+</bpmn:definitions>

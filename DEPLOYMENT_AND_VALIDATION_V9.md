@@ -3,28 +3,23 @@
 **Projeto:** Automação Inteligente de Triagem e Classificação de Chamados GLPI com Múltiplos Modelos de IA  
 **Instituição de Referência:** IF Sudeste MG - Campus Rio Pomba  
 **Versão da Arquitetura:** V9 (Microsserviços Orientados a Eventos com 6 Workflows n8n)  
-**Status do Sistema:** Protótipo Avançado / Validação Técnica Concluída Parcialmente  
+**Status do Sistema:** Protótipo Avançado / Validação Técnica Conclu## 1. Visão Geral da Arquitetura V9
 
----
+A arquitetura V9 desacopla a recepção de chamados do processamento de inteligência artificial através de uma fila transacional assíncrona em PostgreSQL com garantia de concorrência (`SKIP LOCKED` e *advisory locks*). O plugin do GLPI executa um webhook HTTP síncrono que alimenta a fila assíncrona do WF06:
 
-## 1. Visão Geral da Arquitetura V9
-
-A arquitetura V9 desacopla a recepção síncrona de chamados do processamento de inteligência artificial através de uma fila transacional assíncrona em PostgreSQL com garantia de concorrência (SKIP LOCKED e *advisory locks*):
-
-`mermaid
+```mermaid
 graph TD
     User([Usuário / Solicitante]) -->|Abre Chamado| GLPI[GLPI Helpdesk :9080]
-    GLPI -->|Hook HTTP Assíncrono| WF06[WF06: Fila IA Ingress :5678]
-    WF06 -->|Grava com Status PENDENTE_FILA_IA| PG[(PostgreSQL :5432)]
+    GLPI -->|Hook HTTP Síncrono| WF06[WF06: Fila IA Ingress & Dispatcher :5678]
+    WF06 -->|Grava Status PENDENTE_FILA_IA| PG[(PostgreSQL :5432)]
+    WF06 -->|Despacho Imediato de Lote| WF02[WF02: Triagem & Deduplicação]
+    WF06 -->|Despacho Imediato de Lote| WF03[WF03: Classificação IA]
     
-    Cron([Disparador Cron / Polling]) --> WF01[WF01: Sincronizador]
-    WF01 -->|Reserva Lote com Leases| PG
-    WF01 -->|Despacha Chamados| WF02[WF02: Triagem & Deduplicação]
-    WF01 -->|Despacha Chamados| WF03[WF03: Classificação IA]
+    WF01[WF01: Sincronizador / Reconciliador] -.->|Polling & Recuperação de Leases Expirados| PG
     
     WF02 -->|Decisão Deduplicação| LocalAI[Serviço Local IA :8090<br/>Granite 97M + TF-IDF]
     WF03 -->|Decisão Classificação| LocalAI
-    LocalAI -.->|Fallback de Nuvem Auditado| Gemini[Google Gemini API]
+    LocalAI -.->|Fallback Secundário de Nuvem| Gemini[Google Gemini API]
     
     WF02 -->|Conclusão| WF04[WF04: Decisão Fiscal & E-mails]
     WF03 -->|Conclusão| WF04
@@ -32,7 +27,7 @@ graph TD
     WF04 -->|Dispara Notificação| Mailpit[Mailpit :18025 / SMTP :1025]
     
     WF05[WF05: Métricas & SLA] -->|Auditoria Contínua| PG
-`
+```
 
 ---
 
@@ -45,7 +40,7 @@ graph TD
 
 ### 2.2 Dependências de Software
 * **Docker Engine** (v24.0+) e **Docker Compose** (v2.20+).
-* **Python** 3.11 ou 3.12 (64-bit) com pip e env.
+* **Python** 3.11 ou 3.12 (64-bit) com `pip` e `venv`.
 * **PowerShell** 7+ (Windows) ou **Bash** (Linux/macOS).
 
 ---
@@ -53,7 +48,7 @@ graph TD
 ## 3. Preparação do Ambiente e Segredos
 
 ### 3.1 Clonagem e Criação do Ambiente Virtual Python
-`powershell
+```powershell
 # 1. Navegar até a raiz do projeto
 cd c:\Users\Cayo\Documents\projeto-ic
 
@@ -64,23 +59,23 @@ python -m venv .venv
 # 3. Instalar as dependências pinadas de desenvolvimento e IA
 pip install -r requirements.txt
 pip install -r local_ai/requirements-hybrid.txt
-`
+```
 
 ### 3.2 Configuração dos Arquivos de Ambiente (.env)
 Copie os arquivos de exemplo para inicializar a configuração local:
 
-`powershell
+```powershell
 # Configuração do n8n e banco PostgreSQL
 Copy-Item n8n\.env.example n8n\.env
 Copy-Item n8n\.env.local.example n8n\.env.local
 
 # Configuração do GLPI e banco MariaDB
 Copy-Item glpi\.env.example glpi\.env
-`
+```
 
 > [!WARNING]
 > **Segurança de Credenciais:**  
-> Substitua todos os valores marcados como CHANGE_ME nos arquivos .env locais (senhas de banco, GLPI_APP_TOKEN, GLPI_AUTH_BASIC, IA_LOCAL_API_TOKEN e WEBHOOK_AUTH_KEY). Os arquivos .env e .env.local são estritamente ignorados pelo .gitignore e nunca devem ser versionados no Git.
+> Substitua todos os valores marcados como `CHANGE_ME` nos arquivos `.env` locais (senhas de banco, `GLPI_APP_TOKEN`, `GLPI_AUTH_BASIC`, `IA_LOCAL_API_TOKEN` e `WEBHOOK_AUTH_KEY`). Os arquivos `.env` e `.env.local` são estritamente ignorados pelo `.gitignore` e nunca devem ser versionados no Git.
 
 ---
 
@@ -88,7 +83,7 @@ Copy-Item glpi\.env.example glpi\.env
 
 O ecossistema opera sobre 5 contêineres Docker distribuídos em redes isoladas:
 
-`powershell
+```powershell
 # 1. Subir banco de dados MariaDB e GLPI
 docker compose -f glpi/docker-compose.yml up -d
 
@@ -97,14 +92,14 @@ docker compose -f n8n/docker-compose.yml up -d
 
 # 3. Validar se todos os 5 contêineres estão operacionais e saudáveis
 docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-`
+```
 
 ### Portas e Interfaces Padrão:
-* **GLPI Helpdesk:** http://localhost:9080
-* **n8n Automation:** http://localhost:5678
-* **Mailpit Web UI:** http://localhost:18025 (SMTP interno na porta 1025)
-* **PostgreSQL:** localhost:5432 (banco de triagem e proveniência)
-* **MariaDB:** localhost:3306 (banco de dados do GLPI)
+* **GLPI Helpdesk:** `http://localhost:9080` (credenciais em `glpi/.env`)
+* **n8n Automation:** `http://localhost:5678` (credenciais em `n8n/.env`)
+* **Mailpit Web UI:** `http://localhost:18025` (SMTP interno na porta `1025`)
+* **PostgreSQL:** `localhost:5432` (banco de triagem, filas e proveniência)
+* **MariaDB:** Rede interna isolada do Docker (acessível exclusivamente pelo GLPI)
 
 ---
 
