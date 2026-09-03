@@ -1,6 +1,6 @@
 # Hierarquia das fontes de verdade
 
-**Estado:** canônico em 02/09/2026
+**Estado:** canônico em 03/09/2026
 **Escopo:** triagem GLPI, workflows V9, modelo local e avaliação científica
 
 Esta hierarquia impede que um texto, dashboard ou resultado antigo prevaleça
@@ -77,19 +77,27 @@ publicado, o resultado é invalidado, mesmo que um relatório diga `VALID`.
 - histórico: V1–V8 sanitizado/inativo em `n8n/history/`, V9 em
   `n8n/workflows/Versão9/`;
 - evidência E2E: sintética, isolada e não confirmatória;
-- evidência E2E final: `e2e-pipeline-local-v1.8.0-20260902-1950.json`,
+- evidência E2E final: `e2e-pipeline-local-v1.8.0-20260903-final.json`,
   `passed=true` e cleanup completo;
 - estado operacional pós-E2E: zero `ERRO_IA`, zero fila ativa e zero DLQ
   aberta; histórico reconciliado e preservado;
-- três janelas aceleradas por proxy concluídas, sem sobreposição de grupos;
-  `production_slo_estimated=false`;
-- homologação isolada saudável, sem chamados reais copiados;
+- três partições aceleradas por proxy concluídas, sem sobreposição de grupos;
+  o coletor temporal acumulou ao menos quatro janelas completas no relatório
+  versionado e seis no estado local, todas com SLO proposto `FAIL`; janelas
+  recentes acionaram `STOP` de drift; `production_slo_estimated=false`;
+- homologação isolada revalidada em 03/09, com nove serviços e sem chamados
+  reais copiados;
+- navegador: seis workflows V9 publicados no n8n, execuções recentes do WF06
+  em `Success` e GLPI autenticado/listando chamados, sem mutação;
+- segredo: árvore candidata `PASS` com zero achado; histórico alcançável `FAIL`
+  com 15 achados que exigem rotação;
 - conclusão científica: bloqueada pela decisão de não produzir gabarito humano
   independente nem revisão em pares; não abrir holdout confirmatório.
 
 ## Documentos canônicos
 
 - `README.md`
+- `docs/auditoria_critica_completa_2026-09-03.md`
 - `docs/auditoria_critica_completa_2026-09-02.md`
 - `docs/auditoria_critica_completa_2026-09-01.md`
 - `docs/auditoria_critica_completa_2026-08-26.md`

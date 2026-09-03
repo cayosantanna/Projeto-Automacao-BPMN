@@ -8,29 +8,35 @@ __pycache__/
 .coverage
 htmlcov/
 
-# Ambientes locais e binarios pesados (> 100MB)
+# Ambientes virtuais e pastas de assistentes/agentes
 .venv/
 venv/
+.agents/
+.codex/
+.agentes/
+
+# Segredos e configuracoes de ambiente locais
 **/.env
 **/.env.local
 **/.env.*
 !**/.env.example
 !**/.env.local.example
+api_key.txt
+**/api_key.txt
+
+# Bancos de dados e binarios pesados (> 100MB)
 *.sqlite
 *.sqlite-*
 *.sqlite3
 *.sqlite3-*
 *.db
 *.db-*
-backups/n8n/n8n_db.sqlite*
 backups/n8n/**
-backups/workflows/**
 glpi/backups/**
 local_ai/models/**
 !local_ai/models/manifest.json
 
 # Artefatos locais reproduziveis ou sensiveis
-.codex/Memória.md
 local_ai/runtime/**
 n8n/workflows/all_credentials_export_runtime.json
 *.pid
@@ -39,8 +45,6 @@ n8n/workflows/all_credentials_export_runtime.json
 avaliacao/resultados/**/partials/
 avaliacao/resultados/**/execucao.stdout.log
 avaliacao/resultados/**/execucao.stderr.log
-# Coleta viva local; somente relatórios agregados e redigidos devem ser versionados.
 avaliacao/runtime/monitoring/
 avaliacao/runtime/backups/
-n8n/.env.homolog
-glpi/.env.homolog
+

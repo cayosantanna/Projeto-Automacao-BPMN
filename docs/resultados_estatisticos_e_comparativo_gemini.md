@@ -1,6 +1,6 @@
 # Resultados estatísticos e comparações
 
-**Revisão:** 02/09/2026  
+**Revisão:** 03/09/2026
 **Escopo:** desenvolvimento sintético com rótulos-proxy; não confirmatório.
 
 ## Conclusão correta
@@ -115,6 +115,19 @@ Essas janelas não usam chamados reais, não esperam dias e validam apenas o
 mecanismo técnico de particionamento/SLO/drift. Elas não estimam disponibilidade
 longitudinal nem confirmam correção semântica.
 
+## Telemetria operacional separada
+
+As partições proxy acima não são as janelas temporais do coletor. Em 03/09, o
+estado local do monitor acumulava seis janelas intradiárias completas; todas
+falharam os SLOs propostos, e as mais recentes acionaram `STOP` por PSI de
+confiança. Isso é um resultado operacional negativo válido e não altera as
+métricas de classificação. O ponto vivo mais recente via HTTP estava saudável,
+mas uma fotografia saudável não apaga as falhas agregadas na janela.
+
+Na carga limitada de 03/09, concorrência 1 obteve 40/40 HTTP 200, enquanto
+concorrência 4 obteve 17/40 HTTP 200 e 23/40 HTTP 429. Não houve 5xx. Essa
+saturação mede capacidade do serviço local neste host, não qualidade semântica.
+
 ## Gemini
 
 Não existe rodada Gemini atual, pareada e conjuntamente válida que permita
@@ -128,9 +141,11 @@ fallback e com cota/janela previamente confirmadas.
 
 - `avaliacao/resultados/selecao-supervisionada-v2.1-20260826/`;
 - `avaliacao/resultados/operacional/janelas-aceleradas-proxy-20260902.json`;
-- `avaliacao/resultados/e2e-pipeline-local-v1.8.0-20260902-1950.json`;
-- `avaliacao/resultados/operacional/carga-classificacao-c1-20260902.json`;
-- `avaliacao/resultados/operacional/carga-classificacao-c4-20260902.json`.
+- `avaliacao/resultados/e2e-pipeline-local-v1.8.0-20260903-final.json`;
+- `avaliacao/resultados/operacional/carga-classificacao-c1-20260903.json`;
+- `avaliacao/resultados/operacional/carga-classificacao-c4-20260903.json`;
+- `avaliacao/resultados/operacional/estado-runtime-pos-e2e-20260903.json`;
+- `avaliacao/resultados/operacional/varredura-segredos-20260903.json`.
 
 Todos os números desta página são evidência técnica/de desenvolvimento por
 proxy. `scientific_ready=false` e `confirmatory_claim_allowed=false` permanecem

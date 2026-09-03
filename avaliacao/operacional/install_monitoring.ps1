@@ -8,46 +8,48 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $python = Join-Path $root '.venv\Scripts\pythonw.exe'
-$collector = Join-Path $root 'avaliacao\operacional\collector.py'
+$daemon = Join-Path $root 'avaliacao\operacional\monitor_daemon.py'
 $runtime = Join-Path $root 'avaliacao\runtime\monitoring'
 
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     throw "Ambiente Python não encontrado em $python"
 }
 
-$action = New-ScheduledTaskAction `
-    -Execute $python `
-    -Argument ('"{0}" --runtime-dir "{1}"' -f $collector, $runtime) `
-    -WorkingDirectory $root
-$trigger = New-ScheduledTaskTrigger `
-    -Once `
-    -At ((Get-Date).AddMinutes(1)) `
-    -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
-$settings = New-ScheduledTaskSettingsSet `
-    -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries `
-    -MultipleInstances IgnoreNew `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
-    -StartWhenAvailable `
-    -Hidden
+$runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$runName = 'ProjetoICMonitoramento'
+$intervalSeconds = $IntervalMinutes * 60
+$arguments = ('"{0}" --runtime-dir "{1}" --interval-seconds {2}' -f $daemon, $runtime, $intervalSeconds)
+$runCommand = ('"{0}" {1}' -f $python, $arguments)
 
-Register-ScheduledTask `
-    -TaskName $TaskName `
-    -Action $action `
-    -Trigger $trigger `
-    -Settings $settings `
-    -Description 'Coleta técnica local oculta de SLO e drift do projeto-ic; sem confirmação semântica.' `
-    -Force | Out-Null
+New-Item -Path $runKey -Force | Out-Null
+Set-ItemProperty -Path $runKey -Name $runName -Value $runCommand
 
-if ($RunNow) {
-    Start-ScheduledTask -TaskName $TaskName
+# Remove a tarefa antiga: nesta máquina o Agendador recusava o token interativo
+# (0x800710E0). O pythonw no Run do usuário não cria uma janela de terminal.
+$oldTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+if ($oldTask) {
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
 }
 
-$task = Get-ScheduledTask -TaskName $TaskName
+if ($RunNow) {
+    $existing = Get-CimInstance Win32_Process | Where-Object {
+        $_.Name -eq 'pythonw.exe' -and
+        $_.CommandLine -like ('*"{0}"*' -f $daemon)
+    }
+    foreach ($process in ($existing | Sort-Object ProcessId -Descending)) {
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    Start-Process `
+        -FilePath $python `
+        -ArgumentList $arguments `
+        -WorkingDirectory $root `
+        -WindowStyle Hidden
+}
+
 [pscustomobject]@{
-    TaskName = $task.TaskName
-    State = $task.State
+    InstallMode = 'HKCU_RUN_PYTHONW'
+    RunEntry = $runName
     IntervalMinutes = $IntervalMinutes
-    Collector = $collector
+    Daemon = $daemon
     RuntimeDirectory = $runtime
 }

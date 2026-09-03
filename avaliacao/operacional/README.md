@@ -15,9 +15,11 @@ uma declaração de conformidade do NIST.
 - `politica_operacional_v1.json` é uma proposta ainda não aprovada; seus
   limiares só se tornam compromisso institucional após aceite e congelamento
   formais.
-- os SLOs são limiares propostos e não aprovados. Três janelas técnicas
-  aceleradas e disjuntas por grupo foram concluídas em 02/09; elas não são
-  três janelas temporais de produção;
+- os SLOs são limiares propostos e não aprovados. O relatório versionado de
+  03/09 contém pelo menos quatro janelas temporais intradiárias completas; o
+  estado local chegou a seis. Todas falharam os limiares propostos. As três
+  partições aceleradas e disjuntas por grupo são outra evidência, destinada a
+  testar o mecanismo proxy; nenhuma delas é janela de produção;
 - os testes de falha padrão usam servidores efêmeros no loopback e nunca
   desligam GLPI, IA ou PostgreSQL vivos;
 - o restore com `--apply` usa containers aleatórios, `--network none`, nenhuma
@@ -28,8 +30,9 @@ uma declaração de conformidade do NIST.
 - o DDL foi retirado do JSON runtime do WF05. O ambiente vivo agora usa
   `triagem_migration_admin` para migração e `triagem_app` para runtime; a prova
   de menor privilégio inclui negação de DDL com SQLSTATE 42501.
-- o coletor está instalado como tarefa agendada oculta via `pythonw.exe`; seus
-  subprocessos usam `CREATE_NO_WINDOW` no Windows.
+- o coletor está instalado como daemon oculto via `pythonw.exe`, iniciado pela
+  chave de usuário `ProjetoICMonitoramento` em `HKCU\...\Run`; a tarefa
+  agendada antiga foi removida e subprocessos usam `CREATE_NO_WINDOW`.
 - a homologação sintética separada está instanciada com nove serviços, redes,
   volumes, portas e segredos próprios, sem copiar chamados reais.
 
@@ -39,8 +42,8 @@ uma declaração de conformidade do NIST.
 |---|---|---|---|
 | GOVERN | Responsabilidade, tolerância e rastreabilidade | política versionada; rótulos de evidência; SLO explicitamente não aprovado; ações fail-closed; plano de rollback | Parcial; responsáveis e aceite institucional pendentes |
 | MAP | Contexto GLPI–n8n–IA–PostgreSQL e impacto de decisões erradas | dependências mapeadas; mutação GLPI bloqueada quando falta uma dependência; limites de interpretação em todo relatório | Parcial; impacto e subgrupos precisam validação institucional |
-| MEASURE | Disponibilidade, latência, fila, DLQ, erros, backup e drift | carga limitada; três janelas proxy aceleradas; Jensen–Shannon e PSI; restore do volume n8n; auditoria de privilégios | Evidência técnica concluída; não longitudinal nem semântica |
-| MANAGE | Resposta a falha, abstinência e rollback | simulação isolada; decisão automática proibida em falha; STOP de drift; SQL de menor privilégio e rollback pré-mudança | Parcial; drills E2E e aprovação operacional pendentes |
+| MEASURE | Disponibilidade, latência, fila, DLQ, erros, backup e drift | carga limitada; janelas temporais intradiárias; três partições proxy aceleradas; Jensen–Shannon e PSI; restore do volume n8n; auditoria de privilégios | Mecanismo concluído; SLO proposto falhou e não há validade longitudinal/semântica |
+| MANAGE | Resposta a falha, abstinência e rollback | simulação isolada; E2E sintético com cleanup; decisão automática proibida em falha; STOP de drift; SQL de menor privilégio | Parcial; aprovação operacional e resposta ao STOP pendentes |
 
 O framework também trata sistemas de IA como sociotécnicos e recomenda separar
 atores que desenvolvem daqueles que verificam e validam. O projeto decidiu não
@@ -74,10 +77,11 @@ python avaliacao/operacional/validar_operacao.py `
   --output avaliacao/resultados/operacional/carga.json
 ```
 
-Em 01/09, uma carga híbrida real de classificação teve 40/40 sucessos com
-concorrência 1, mas 22/40 respostas 429 com concorrência 4. Isso evidencia o
-limite atual do semáforo de inferência e recomenda pacing conservador; não é
-evidência de capacidade E2E.
+Em 03/09, a carga híbrida local teve 40/40 respostas 200 com concorrência 1
+(19,73 req/s; p95 35,30 ms). Com concorrência 4, houve 17/40 respostas 200 e
+23/40 respostas 429 (saturação 57,5%; p95 1.736,30 ms), sem 5xx. Isso evidencia
+o limite atual do semáforo de inferência e recomenda pacing conservador; não é
+evidência de capacidade E2E ou de eficácia científica.
 
 O restore real também exige autorização explícita. Ele não usa nem remove os
 containers vivos:
@@ -113,11 +117,15 @@ mudança; o login runtime não pode executá-las.
 
 ## Monitoramento e SLO propostos
 
-O coletor local executa a cada minuto em segundo plano. A política longitudinal
-de 30 dias foi retirada do escopo por decisão do projeto. Para validar o
-mecanismo no mesmo dia, `validate_accelerated_proxy_windows.py` criou três
-janelas por contagem, com 372/371/371 registros e grupos sem sobreposição.
-`production_slo_estimated=false` permanece obrigatório.
+O coletor local executa a cada minuto em segundo plano. `daemon-status.json`
+informa o estado do processo; `latest.json` contém a coleta atual; e
+`windows.json` acumula janelas. A política longitudinal de 30 dias foi retirada
+do escopo. Em 03/09 havia seis janelas intradiárias completas no estado local;
+todas falharam o SLO proposto, e as mais recentes registraram `STOP` de drift
+por mudança na distribuição de confiança. Separadamente,
+`validate_accelerated_proxy_windows.py` criou três partições por contagem, com
+372/371/371 registros e grupos sem sobreposição. `production_slo_estimated=false`
+e `semantic_correctness_confirmed=false` permanecem obrigatórios.
 
 Alertas implementados como gates/STOP na política:
 

@@ -63,10 +63,13 @@ class V9ContractTests(unittest.TestCase):
             webhook["parameters"]["path"], "glpi-ticket-fila-ia-v9"
         )
         preparar = parameters_text(self.wf06, "Preparar Entrada GLPI")
-        self.assertIn("GLPI_WEBHOOK_KEY", preparar)
-        self.assertIn("expectedKey.length > 0", preparar)
-        self.assertIn("expectedKey !== 'CHANGE_ME'", preparar)
-        self.assertIn("receivedKey === expectedKey", preparar)
+        self.assertIn("gateway n8n-gateway valida X-Webhook-Key", preparar)
+        self.assertNotIn("GLPI_WEBHOOK_KEY", preparar)
+        gateway = (SCRIPT_DIR.parents[2] / "n8n" / "proxies" / "n8n-gateway.conf.template").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("location = /webhook/glpi-ticket-fila-ia-v9", gateway)
+        self.assertIn('$http_x_webhook_key != "${GLPI_WEBHOOK_KEY}"', gateway)
         self.assertNotIn("glpi-ticket-novo-glpi-n8n-ic-2026", preparar)
 
     def test_wf04_get_renderiza_preview_sem_alcancar_nos_de_mutacao(self) -> None:

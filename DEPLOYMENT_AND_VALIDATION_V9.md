@@ -1,6 +1,6 @@
 # Implantação e validação da arquitetura V9
 
-**Revisão:** 02/09/2026
+**Revisão:** 03/09/2026
 **Status:** candidata operacional validada tecnicamente no ambiente local;
 eficácia científica e prontidão produtiva pendentes.
 
@@ -41,11 +41,12 @@ fila vazio e bundle `local-hybrid-v1.8.0`.
 | paridade de deploy | lógica publicada igual à canônica | eficácia |
 | smoke live | health, banco e rejeição segura | caminho completo |
 | E2E sintético | integração WF06→WF02→WF03 e rollback | acurácia real |
-| holdout humano | eficácia no conjunto definido | generalização futura ilimitada |
+| benchmark agrupado por proxy | discriminação no corpus sintético definido | correção semântica institucional |
 
-A rodada E2E final de 02/09/2026 passou, sem fallback, com fila/DLQ zeradas e
-cleanup completo. O n8n foi inspecionado autenticado no navegador. Isso não
-autoriza a expressão “100% correto”.
+A rodada E2E final de 03/09/2026 passou, sem fallback, sem interferência
+estranha, com fila/DLQ zeradas e cleanup completo. n8n e GLPI foram
+inspecionados autenticados no navegador. Isso não autoriza a expressão “100%
+correto”.
 
 ## Hardening antes de produção
 
@@ -63,16 +64,18 @@ autoriza a expressão “100% correto”.
 ## Homologação isolada
 
 A stack `projeto-ic-homolog` usa portas 15678/55432/19080/28025, volumes,
-redes e segredos próprios. Em 02/09 os nove serviços ficaram saudáveis, o
+redes e segredos próprios. Em 03/09 os nove serviços ficaram saudáveis, o
 PostgreSQL tinha 40 tabelas, zero tickets e role runtime sem privilégios
 administrativos. Não foram copiados chamados reais.
 
 ## Monitoramento sem janela visível
 
-`avaliacao/operacional/install_monitoring.ps1` registra a tarefa
-`ProjetoIC-Monitoramento` com `pythonw.exe` e flag oculta. No Windows, chamadas
-curtas ao Docker usam `CREATE_NO_WINDOW`, evitando o terminal que aparecia a
-cada minuto.
+`avaliacao/operacional/install_monitoring.ps1` remove a antiga tarefa agendada
+defeituosa e registra `ProjetoICMonitoramento` em
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. O daemon usa
+`pythonw.exe`, rejeita instâncias duplicadas e registra apenas estado sanitizado
+em `avaliacao/runtime/monitoring/daemon-status.json`. Chamadas curtas ao Docker
+usam `CREATE_NO_WINDOW`, evitando o terminal que aparecia a cada minuto.
 
 Procedimento detalhado, incluindo smokes, E2E, histórico e seleção científica:
 `docs/tutorial_reproducao_e_implantacao.md`.

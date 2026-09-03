@@ -47,28 +47,17 @@ class UpdateFailureSession:
 
 
 class TestDeployESegredos(unittest.TestCase):
-    def test_env_normalizer_prioritizes_n8n_env_and_is_idempotent(self):
+    def test_env_normalizer_uses_runner_process_env_and_is_idempotent(self):
         source = (
             "const one=(typeof process !== 'undefined' && process.env.FOO) || 'x';\n"
             "const two=process.env.BAR;\n"
             "const dynamic=(typeof process!=='undefined' && process.env[name]) || '';"
         )
         normalized = workflow_helpers.normalize_n8n_env_access(source)
-        self.assertIn(
-            "(typeof $env !== 'undefined' && $env.FOO) || "
-            "(typeof process !== 'undefined' && process.env.FOO)",
-            normalized,
-        )
-        self.assertIn(
-            "(typeof $env !== 'undefined' && $env.BAR) || "
-            "(typeof process !== 'undefined' && process.env.BAR)",
-            normalized,
-        )
-        self.assertIn(
-            "(typeof $env !== 'undefined' && $env[name]) || "
-            "(typeof process !== 'undefined' && process.env[name])",
-            normalized,
-        )
+        self.assertNotIn("$env", normalized)
+        self.assertIn("typeof process !== 'undefined' && process.env.FOO", normalized)
+        self.assertIn("process.env.BAR", normalized)
+        self.assertIn("typeof process!=='undefined' && process.env[name]", normalized)
         self.assertEqual(
             workflow_helpers.normalize_n8n_env_access(normalized), normalized
         )

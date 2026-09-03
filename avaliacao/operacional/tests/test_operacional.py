@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from avaliacao.operacional import backup_restore_drill, core, least_privilege, validar_operacao
+from avaliacao.operacional import backup_restore_drill, core, least_privilege, monitor_daemon, validar_operacao
 from avaliacao.operacional.collector import _backup_restore_age_hours, _single_instance_lock, summarize_windows
 from avaliacao.operacional.core import (
     bounded_load_probe,
@@ -164,6 +164,28 @@ def test_collector_recovers_reusable_descriptor_lock(tmp_path: Path) -> None:
         assert acquired is True
     with _single_instance_lock(lock_path) as acquired_again:
         assert acquired_again is True
+
+
+def test_monitor_daemon_status_is_sanitized(tmp_path: Path) -> None:
+    status_path = tmp_path / "daemon-status.json"
+    monitor_daemon._status(status_path, "DEGRADED", detail="TimeoutError")
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["state"] == "DEGRADED"
+    assert status["detail"] == "TimeoutError"
+    assert status["scientific_result"] is False
+    assert status["semantic_correctness_confirmed"] is False
+
+
+def test_monitor_installer_uses_hidden_user_startup_and_removes_old_task() -> None:
+    installer = (ROOT / "avaliacao" / "operacional" / "install_monitoring.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" in installer
+    assert "ProjetoICMonitoramento" in installer
+    assert ".venv\\Scripts\\pythonw.exe" in installer
+    assert "Unregister-ScheduledTask" in installer
+    assert "-WindowStyle Hidden" in installer
+    assert "Register-ScheduledTask" not in installer
 
 
 def test_collector_reads_nested_n8n_restore_timestamp(tmp_path: Path) -> None:

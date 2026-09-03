@@ -99,7 +99,13 @@ try {
         Wait-JsonHealth -Uri 'http://127.0.0.1:8091/health' -TimeoutSeconds $ExtractorStartupTimeoutSeconds | Out-Null
     }
 
-    $python = (Get-Command python -ErrorAction Stop).Source
+    $pythonw = Join-Path $RepositoryRoot '.venv\Scripts\pythonw.exe'
+    $python = if (Test-Path -LiteralPath $pythonw -PathType Leaf) {
+        $pythonw
+    }
+    else {
+        (Get-Command pythonw -ErrorAction Stop).Source
+    }
     $environment = [ordered]@{
         LOCAL_AI_MODE = 'production'
         LOCAL_AI_HOST = '0.0.0.0'

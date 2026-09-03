@@ -4,7 +4,7 @@ Protótipo operacional e plataforma de pesquisa para triagem, deduplicação e
 classificação de chamados de manutenção predial. A arquitetura integra GLPI,
 n8n, PostgreSQL e um serviço local de IA com Granite Embedding 97M.
 
-> Estado em 2026-09-02: o caminho técnico V9 funciona no ambiente local, o E2E
+> Estado em 2026-09-03: o caminho técnico V9 funciona no ambiente local, o E2E
 > sintético final passou, fila/DLQ ficaram zeradas e uma homologação isolada
 > com nove serviços está saudável. O modelo ainda **não possui validação
 > confirmatória institucional**. `scientific_ready=false` e
@@ -52,22 +52,28 @@ autoriza trocar o bundle operacional.
   lógica no n8n local;
 - o E2E sintético isolado percorreu WF06 → WF02 → WF03, sem fallback, com
   cleanup e restauração completos; a rodada final aprovada está em
-  `avaliacao/resultados/e2e-pipeline-local-v1.8.0-20260902-1950.json`;
+  `avaliacao/resultados/e2e-pipeline-local-v1.8.0-20260903-final.json`;
 - após o reparo, `ERRO_IA=0`, fila ativa `=0` e DLQ aberta `=0`; as 84 DLQs e
   129 estados históricos foram reconciliados sem apagar a trilha;
-- n8n foi conferido autenticado no navegador em 02/09; o GLPI abriu na porta
-  9180, mas a sessão havia expirado e o novo login ficou condicionado à
-  confirmação de transmissão da senha;
+- n8n e GLPI foram conferidos autenticados no navegador em 03/09: os seis
+  workflows V9 apareceram publicados, as execuções recentes do WF06 estavam em
+  `Success` e a listagem de chamados do GLPI abriu sem mutação;
 - o serviço local carrega o bundle operacional congelado `v1.8.0`, Granite PyTorch FP32 de
   384 dimensões, sem fallback de embedding;
 - a telemetria do WF06 agora exclui e põe em quarentena tickets pertencentes a
   experiências encerradas;
 - segredos, bancos, backups, binários e caches locais foram retirados do
   versionamento.
-- três janelas aceleradas por proxy foram concluídas sem vazamento de grupos;
-  isso valida o mecanismo técnico, não disponibilidade longitudinal;
+- três partições aceleradas por proxy foram concluídas sem vazamento de grupos;
+  separadamente, o coletor acumulou pelo menos quatro janelas temporais
+  intradiárias no relatório versionado (seis no estado local de 03/09). Todas
+  falharam os SLOs propostos e as mais recentes acionaram `STOP` de drift; isso
+  valida o mecanismo de detecção, não disponibilidade longitudinal;
 - a homologação sintética separada usa portas, redes, volumes e segredos
   próprios, sem copiar chamados reais.
+- a varredura final encontrou zero segredo na árvore candidata e 15 achados no
+  histórico Git alcançável; o passivo histórico exige rotação e não foi ocultado
+  por reescrita destrutiva.
 
 Isso não permite dizer que “o n8n está 100% correto”. Testes demonstram os
 casos exercitados; não provam correção para toda entrada, falha concorrente ou
@@ -111,7 +117,7 @@ python n8n/workflows/Versão9/validate_v9_static.py
 python n8n/workflows/Versão9/deploy.py
 
 # Testes
-python -m pytest -q local_ai/tests avaliacao/tests
+python -m pytest -q local_ai/tests avaliacao/tests avaliacao/operacional/tests
 python -m pytest -q n8n/workflows/Versão9/test_v9_hard.py
 python -m pytest -q n8n/history/tests
 python n8n/history/validate_history.py --check-sources
@@ -136,6 +142,7 @@ O E2E mutante exige confirmação explícita e um manifesto congelado; consulte
 
 ## Documentos canônicos
 
+- [Auditoria crítica completa de 2026-09-03](docs/auditoria_critica_completa_2026-09-03.md)
 - [Auditoria crítica completa de 2026-09-02](docs/auditoria_critica_completa_2026-09-02.md)
 - [Auditoria crítica completa de 2026-09-01](docs/auditoria_critica_completa_2026-09-01.md)
 - [Auditoria crítica completa de 2026-08-26](docs/auditoria_critica_completa_2026-08-26.md)

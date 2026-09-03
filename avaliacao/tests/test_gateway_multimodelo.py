@@ -58,7 +58,7 @@ class TestGatewayMultimodelo(unittest.TestCase):
                 "const roles = ['LOCAL','SECONDARY'];",
                 js,
             )
-            self.assertIn("if (role === 'LOCAL') return [...roles];", js)
+            self.assertIn("if (role === 'LOCAL') return ['LOCAL'];", js)
             self.assertIn("envValue('IA_FIXED_MODEL_ROLE','LOCAL')", js)
             self.assertIn(
                 "supportedRoles.includes(requestedRole) ? requestedRole : 'LOCAL'",
@@ -294,21 +294,21 @@ process.stdout.write(JSON.stringify(output[0].json));
         )["parameters"]["jsCode"]
 
         cases = [
-            {"pd": 0.50, "decision": False, "gates": [], "review": True},
-            {"pd": 0.20, "decision": False, "gates": [], "review": True},
-            {"pd": 0.08, "decision": False, "gates": [], "review": False},
-            {"pd": 0.95, "decision": True, "gates": [], "review": False},
+            {"pd": 0.50, "decision": False, "gates": [], "abstain": True},
+            {"pd": 0.20, "decision": False, "gates": [], "abstain": False},
+            {"pd": 0.08, "decision": False, "gates": [], "abstain": False},
+            {"pd": 0.95, "decision": True, "gates": [], "abstain": False},
             {
                 "pd": 0.01,
                 "decision": False,
                 "gates": ["operational_abstention"],
-                "review": True,
+                "abstain": True,
             },
             {
                 "pd": 0.50,
                 "decision": False,
                 "gates": ["operational_abstention"],
-                "review": True,
+                "abstain": True,
                 "role": "LOCAL",
                 "decision_path": "hybrid_model_abstention",
                 "features": {
@@ -370,12 +370,12 @@ process.stdout.write(JSON.stringify(results));
         )
         results = json.loads(completed.stdout)
         for case, result in zip(cases, results):
-            self.assertEqual(result["requer_revisao_dedup"], case["review"])
-            self.assertEqual(result["abstencao_operacional_dedup"], case["review"])
+            self.assertEqual(result["requer_revisao_dedup"], case["abstain"])
+            self.assertEqual(result["abstencao_operacional_dedup"], case["abstain"])
             self.assertEqual(
                 result["decisao_operacional_dedup"],
                 "ABSTENCAO"
-                if case["review"]
+                if case["abstain"]
                 else ("DUPLICADO" if case["decision"] else "NAO_DUPLICADO"),
             )
             if "semantic_pd" in case:
@@ -608,7 +608,9 @@ process.stdout.write(JSON.stringify(results));
 
         demo = results["demo_without_team"]
         self.assertEqual(demo["classificacao"]["classe_semantica"], "DEMO")
-        self.assertEqual(demo["classificacao"]["rota_operacional"], "DEMO_SEM_EQUIPE")
+        # A disponibilidade da equipe é configuração congelada no workflow;
+        # variáveis do processo Node não podem alterar o artefato publicado.
+        self.assertEqual(demo["classificacao"]["rota_operacional"], "DEMO")
         self.assertFalse(demo["abstencao_operacional_classif"])
 
         missing_location = results["local_missing_exact_location"]
@@ -784,7 +786,7 @@ process.stdout.write(JSON.stringify(results));
             "candidate_evaluation_eligible": True,
             "pipeline_evaluation_eligible": True,
             "decision_path": "hybrid_model",
-            "artifact": {"version": "local-hybrid-bundle-v1.1.0"},
+            "artifact": {"version": "local-hybrid-bundle-v1.8.0"},
             "embedding": {
                 "backend": "granite_embedding_pytorch_fp32",
                 "runtime_backend": "pytorch_fp32",
@@ -809,7 +811,7 @@ process.stdout.write(JSON.stringify(results));
                     "experiment_split": "TESTE",
                     "ia_execution_mode": "BENCHMARK",
                     "ia_fixed_model_role": "LOCAL",
-                    "ia_expected_model": "local-hybrid-v1.1.0",
+                    "ia_expected_model": "local-hybrid-v1.8.0",
                 },
                 "historico_local": [],
                 "historico": [],
@@ -827,7 +829,7 @@ process.stdout.write(JSON.stringify(results));
                 payload.update(payload_override)
             env = {
                 "IA_FAILOVER_ENABLED": "true",
-                "IA_MODEL_LOCAL": "local-hybrid-v1.1.0",
+                "IA_MODEL_LOCAL": "local-hybrid-v1.8.0",
                 "LOCAL_AI_EMBED_BACKEND": "pytorch_fp32",
                 "LOCAL_AI_EMBED_MODEL_REVISION": "835ad14087e140460703cf0fae09f97d469d65c2",
             }
@@ -880,7 +882,7 @@ process.stdout.write(JSON.stringify({{calls,envelope:output[0].json}}));
             "pipeline_evaluation_eligible": True,
             "decision_path": "deterministic_empty_history",
             "artifact": {
-                "version": "local-hybrid-bundle-v1.1.0",
+                "version": "local-hybrid-bundle-v1.8.0",
                 "candidate_bundle_eligible": True,
             },
             "embedding": None,
