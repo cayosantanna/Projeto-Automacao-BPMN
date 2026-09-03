@@ -1,79 +1,137 @@
-# Resultados Estatísticos de Desenvolvimento e Análise Comparativa de Arquitetura
+# Resultados estatísticos e comparações
 
-**Projeto:** Automação de Triagem e Classificação de Chamados GLPI com Múltiplos Modelos de IA  
-**Instituição de Referência:** IF Sudeste MG - Campus Rio Pomba  
-**Data:** Agosto de 2026 (Revisão Alinhada aos Manifestos Oficiais)  
-**Versão Operacional:** `local-hybrid-v1.8.0`  
+**Revisão:** 02/09/2026  
+**Escopo:** desenvolvimento sintético com rótulos-proxy; não confirmatório.
 
----
+## Conclusão correta
 
-> [!IMPORTANT]
-> **Nota Metodológica Sobre o Comparativo com Modelos de Nuvem:**  
-> A comparação confirmatória formal pareada entre o modelo **Local (IBM Granite 97M + TF-IDF)** e o **Google Gemini 3.5 Flash** **permanece formalmente pendente**. As execuções preliminares registradas no repositório sofreram falhas de transporte/conexão (`TRANSPORT_ERROR`) e não constituem uma bateria empírica concluída. Consequentemente, **não são declaradas superioridades semânticas (como "Local > Gemini" ou "7,8x mais rápido E2E")**, mantendo o compromisso estrito com a evidência auditável.
+Não há vencedor cientificamente confirmado nem estimativa de eficácia em
+chamados institucionais. A rodada V2.1 é reproduzível no escopo classificatório,
+mas `development_only=true`, `confirmatory_eligible=false` e nenhum candidato
+passou simultaneamente todos os gates. O runtime continua em
+`local-hybrid-v1.8.0` por estabilidade de engenharia, não porque a V2.1 tenha
+provado que Granite é superior.
 
----
+## Desenho comparativo executado
 
-## 1. Resultados da Seleção Supervisionada de Desenvolvimento (OOF)
+A mesma avaliação agrupada comparou:
 
-A seleção supervisionada no corpus expandido de desenvolvimento avaliou 90 configurações sob validação cruzada 5-fold agrupada por núcleo semântico (1.114 registros elegíveis / 230 núcleos):
+- representações TF-IDF, embedding e híbrida;
+- Granite Embedding 97M Multilingual R2, `multilingual-e5-small` e
+  `paraphrase-multilingual-MiniLM-L12-v2`;
+- regressão logística, árvore de decisão, SVM linear, MLP e XGBoost;
+- 1.114 registros proxy em 111 grupos de dependência-fonte;
+- cinco dobras agrupadas, calibração fora de dobra, risco-cobertura,
+  bootstrap por grupo e comparações pareadas;
+- 35 configurações de classificação, 175 linhas de dobra e 38.990 predições
+  OOF.
 
-### 1.1. Top-5 Classificadores no Corpus de Desenvolvimento
-| Rank | Configuração de Representação e Algoritmo | Macro-F1 OOF | Acurácia Global OOF | Erro Crítico (Não-OBRA $\to$ OBRA) | $\text{UCB}_{95}$ Erro Crítico | Cobertura de Decisão |
-|---:|---|---:|---:|---:|---:|---:|
-| **1º** | `classification__hybrid__granite97m__linear_svm` | **0.9520** | **95.51%** | **0** | **$\le 2.30\%$** | **69.03%** |
-| 2º | `classification__hybrid__multilingual_e5_small__linear_svm` | 0.9466 | 0.9497 | 0 | $\le 2.30\%$ | 69.84% |
-| 3º | `classification__hybrid__multilingual_minilm_l12__linear_svm` | 0.9460 | 0.9515 | 0 | $\le 2.30\%$ | 70.92% |
-| 4º | `classification__hybrid__multilingual_minilm_l12__mlp` | 0.9414 | 0.9442 | 0 | $\le 2.30\%$ | 76.30% |
-| 5º | `classification__hybrid__granite97m__mlp` | 0.9383 | 0.9405 | 0 | $\le 2.30\%$ | 73.79% |
+O validador classificou a rodada como `VALID_PARTIAL_TASK_SCOPE`. A seleção de
+deduplicação foi interrompida antes do ajuste porque havia somente 12 famílias
+independentes, seis por classe; isso é um gate correto, não um resultado nulo.
 
-### 1.2. Matriz de Confusão OOF do Candidato Selecionado (1.114 Amostras Elegíveis)
-```text
-Verdadeiro \ Predito   DEMO   OBRA   SOB_DEMANDA   TRIAGEM_MANUAL
-DEMO                   345      5             5                1
-OBRA                     7    224             0                0
-SOB_DEMANDA              4      0           334               12
-TRIAGEM_MANUAL           6      0            10              161
-```
+## Resultados classificatórios
 
-* **OBRA (DDI/DG):** Precisão = 97.82%, Recall = 96.97%, **F1-Score = 0.9739** (Suporte: 231)
-* **DEMO (Manutenção Interna):** Precisão = 95.30%, Recall = 96.91%, **F1-Score = 0.9610** (Suporte: 356)
-* **SOB_DEMANDA (Terceirizados):** Precisão = 95.70%, Recall = 95.43%, **F1-Score = 0.9557** (Suporte: 350)
-* **TRIAGEM_MANUAL (Abstenção):** Precisão = 92.53%, Recall = 90.96%, **F1-Score = 0.9174** (Suporte: 177)
+O primeiro colocado pela regra hierárquica pré-definida foi híbrido + E5 + SVM
+linear:
 
----
+| Métrica proxy | Estimativa | IC95% agrupado |
+|---|---:|---:|
+| Macro-F1 | 0,7987 | 0,7266–0,8598 |
+| Acurácia | 0,8312 | 0,7653–0,8889 |
+| Cobertura automática | 0,6086 | 0,5229–0,6895 |
+| Risco seletivo | 0,0693 | 0,0229–0,1321 |
+| ECE, 10 bins | 0,0449 | — |
 
-## 2. Resultados da Avaliação Reservada Exploratória (700 Unidades)
+Houve zero eventos proxy não-OBRA→OBRA em 64 grupos expostos, mas o limite
+superior unilateral de 95% foi 4,57%, acima do gate de 2%. Portanto o status é
+`UNDERPOWERED`. Com zero eventos, são necessárias pelo menos 149 exposições
+independentes para um limite estritamente inferior a 2%; duas direções
+disjuntas podem exigir inicialmente 298 grupos, antes de perdas e efeito de
+desenho.
 
-No conjunto de avaliação exploratória reservada, os resultados do pipeline integrado foram:
+O maior Macro-F1 pontual bruto foi do MLP com embedding E5 isolado (0,8036),
+mas sua cobertura automática foi zero sob a política. O SVM com E5 isolado
+teve Macro-F1 0,8004, cobertura 0,4767, risco seletivo 0,1111 e um erro crítico
+proxy; falhou os gates. Esses exemplos mostram por que escolher somente a maior
+acurácia ou Macro-F1 seria metodologicamente incorreto.
 
-* **Unidades Avaliadas:** 700 / 700 (100% de conformidade com schemas e contratos HTTP).
-* **Cobertura Seletiva (*Selective Coverage*):** **8.29%** (58 casos concluídos automaticamente).
-* **Acurácia Seletiva (*Selective Accuracy*):** **100.00%** (0 erros observados exclusivamente na fração coberta).
-* **Encaminhamento Humano (Abstenção):** **92.29%** (646 casos roteados ao fiscal para validação manual).
-* **Falsos Negativos de Deduplicação:** 0 observados no subconjunto processado ($\text{NPV}_{\text{amostral}} = 1.0000$, $\text{UCB}_{95} \approx 2.95\%$).
+Resumo do melhor ponto bruto por família de classificador:
 
----
+| Classificador | Representação/embedding | Macro-F1 | Acurácia | Cobertura | Risco seletivo | Estado |
+|---|---|---:|---:|---:|---:|---|
+| Árvore | híbrido/MiniLM | 0,6962 | 0,7136 | 0,0000 | — | FAIL |
+| SVM | embedding/E5 | 0,8004 | 0,8339 | 0,4767 | 0,1111 | FAIL |
+| Regressão logística | híbrido/E5 | 0,7912 | 0,8232 | 0,5799 | 0,0650 | UNDERPOWERED |
+| MLP | embedding/E5 | 0,8036 | 0,8357 | 0,0000 | — | FAIL |
+| XGBoost | híbrido/E5 | 0,7493 | 0,7747 | 0,0844 | 0,0638 | FAIL |
 
-## 3. Discriminação e Decomposição de Latência
+## Ablações e embeddings
 
-Para evitar comparações enganosas entre microbenchmarks e tempos de rede, a latência do sistema é reportada em 3 níveis distintos:
+As comparações pareadas não demonstraram uma superioridade geral do híbrido ou
+de um embedding:
 
-| Camada do Sistema | Métrica de Latência | Descrição do Escopo Medido |
-|---|---|---|
-| **1. Microbenchmark do Classificador Local** | **143.9 ms (mediana)** | Tempo puro de vetorização e inferência matricial na CPU (PyTorch FP32). |
-| **2. Serviço REST `local_ai`** | **~414 ms (média) / 838 ms (p95)** | Validação de schemas JSON, execução de gates determinísticos, inferência e geração de proveniência. |
-| **3. Pipeline E2E Integrado (GLPI $\to$ n8n $\to$ Postgres)** | **~2.570 ms (p50) / 5.911 ms (p95)** | Tempo ponta-a-ponta incluindo webhook HTTP, persistência em banco com lock e round-trip da API GLPI. |
+- E5 híbrido/logístico versus Granite: Δ Macro-F1 +0,0157; IC95%
+  -0,0077 a +0,0408;
+- MiniLM versus Granite: Δ -0,0061; IC95% -0,0416 a +0,0248;
+- Granite embedding isolado versus híbrido: Δ -0,0668; IC95%
+  -0,1331 a -0,0062;
+- TF-IDF isolado versus híbrido: Δ -0,0015; IC95% -0,0329 a +0,0255.
 
----
+Assim, embedding semântico permanece uma hipótese plausível para paráfrases,
+enquanto TF-IDF continua baseline obrigatório. Não é válido dizer que Granite,
+E5 ou o híbrido “ganhou” de forma confirmatória.
 
-## 4. Comparativo Arquitetural e de Engenharia (Local-First vs. Provedores de Nuvem)
+## Recuperação para deduplicação
 
-| Dimensão de Análise | Arquitetura Local-First (IBM Granite 97M) | Gateway de Nuvem (Gemini 3.5 Flash / DeepSeek) |
-|---|---|---|
-| **Local de Execução** | Container on-premise em CPU | Nuvem pública gerenciada (API REST remota) |
-| **Dependência de Conectividade Externa** | Operação 100% autônoma (imune a quedas de WAN) | Requer conexão de internet estável |
-| **Custo de Inferência** | Infraestrutura existente (sem custo por token) | Cobrança por milhão de tokens (sujeita a variação cambial) |
-| **Controle de Cotas (*Rate Limits*)** | Limitado apenas pelo hardware local | Sujeito a RPM/TPM e limites de projeto |
-| **Função no Workflow V9** | **Provedor Primário Obrigatório** | **Fallback Secundário de Contingência** |
-| **Status da Avaliação Confirmatória** | Aguardando holdout institucional intocado | Aguardando execução do benchmark pareado com cotas autorizadas |
+Em 500 consultas sintéticas derivadas de apenas seis famílias positivas:
 
+| Representação | Recall@1 | Recall@5 | Recall@20 | MRR |
+|---|---:|---:|---:|---:|
+| TF-IDF | 0,324 | 0,658 | 0,788 | 0,4698 |
+| Granite 97M | 0,190 | 0,496 | 0,878 | 0,3396 |
+| E5-small | 0,218 | 0,522 | 0,756 | 0,3574 |
+| MiniLM-L12 | 0,090 | 0,254 | 0,496 | 0,1730 |
+
+Granite teve o maior Recall@20 e TF-IDF o melhor Recall@1/MRR. As 500 consultas
+não são 500 unidades independentes; por isso esses números são descritivos.
+
+## XAI/SHAP
+
+O SHAP teve residual máximo de aditividade de `5,77e-15`. A importância
+agregada foi 52,99% TF-IDF de caracteres, 29,64% TF-IDF de palavras e 17,37%
+embedding. Isso explica atribuições no classificador analisado e sugere forte
+dependência lexical neste corpus; não prova causalidade, justiça ou acerto.
+
+## Três janelas proxy aceleradas
+
+Foram construídas três partições determinísticas, sem sobreposição de grupos,
+com 372/371/371 registros e 37 grupos em cada. Todas as sondagens locais e os
+checks de drift passaram. Macro-F1 por janela foi 0,7758, 0,7221 e 0,8580; o
+risco seletivo foi 0,1391, 0,0177 e 0,0495. A heterogeneidade, especialmente na
+primeira janela, desaconselha uma narrativa baseada apenas na média agregada.
+
+Essas janelas não usam chamados reais, não esperam dias e validam apenas o
+mecanismo técnico de particionamento/SLO/drift. Elas não estimam disponibilidade
+longitudinal nem confirmam correção semântica.
+
+## Gemini
+
+Não existe rodada Gemini atual, pareada e conjuntamente válida que permita
+comparar qualidade semântica. Rodadas históricas sofreram falhas de cota,
+transporte, saldo ou desenho. Falha operacional do provedor não é evidência de
+inferioridade semântica. Uma nova comparação remota só pode ser publicada com
+os mesmos casos, ordem, prompt, candidatos, política e denominadores, sem
+fallback e com cota/janela previamente confirmadas.
+
+## Evidências reproduzíveis
+
+- `avaliacao/resultados/selecao-supervisionada-v2.1-20260826/`;
+- `avaliacao/resultados/operacional/janelas-aceleradas-proxy-20260902.json`;
+- `avaliacao/resultados/e2e-pipeline-local-v1.8.0-20260902-1950.json`;
+- `avaliacao/resultados/operacional/carga-classificacao-c1-20260902.json`;
+- `avaliacao/resultados/operacional/carga-classificacao-c4-20260902.json`.
+
+Todos os números desta página são evidência técnica/de desenvolvimento por
+proxy. `scientific_ready=false` e `confirmatory_claim_allowed=false` permanecem
+obrigatórios.

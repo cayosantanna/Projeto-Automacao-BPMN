@@ -53,6 +53,13 @@ services:
       # glpi-data armazena arquivos e configurações do GLPI 
       - glpi-data:/var/www/html/glpi
       - ./plugins/n8nwebhook:/var/www/html/glpi/plugins/n8nwebhook
+
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS -o /dev/null --max-time 5 http://127.0.0.1/ || exit 1']
+      interval: 10s
+      timeout: 6s
+      retries: 12
+      start_period: 45s
   
     # GLPI inicia apos bd
     depends_on:

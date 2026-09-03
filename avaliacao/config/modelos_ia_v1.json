@@ -1,10 +1,10 @@
 {
-  "schema_version": "1.4.0",
-  "verified_at": "2026-08-17",
+  "schema_version": "1.5.0",
+  "verified_at": "2026-09-02",
   "operational_policy": {
-    "name": "local-pytorch-fp32-com-gemini35-secundario-v4",
-    "sequence": ["LOCAL", "SECONDARY"],
-    "failover_enabled": true,
+    "name": "local-pytorch-fp32-sem-segredos-em-code-v5",
+    "sequence": ["LOCAL"],
+    "failover_enabled": false,
     "fallback_only_after_invalid_or_failed_response": true
   },
   "confirmatory_policy": {
@@ -36,7 +36,8 @@
       "standard_free_tier_output_usd_per_million": 0.0,
       "paid_input_usd_per_million": 1.5,
       "paid_output_usd_per_million": 9.0,
-      "active_operational_role": true
+      "active_operational_role": false,
+      "note": "restrito ao benchmark pareado; não é contingência do workflow operacional"
     },
     "LOCAL": {
       "provider": "local-native",

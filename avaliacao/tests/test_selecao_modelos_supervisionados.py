@@ -13,7 +13,13 @@ from avaliacao.scripts import validar_resultados_selecao as result_validation
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = (
-    ROOT / "avaliacao" / "config" / "selecao_modelos_supervisionados_v1.json"
+    ROOT / "avaliacao" / "config" / "selecao_modelos_supervisionados_v2.json"
+)
+CLASSIFICATION_CONFIG_PATH = (
+    ROOT
+    / "avaliacao"
+    / "config"
+    / "selecao_classificacao_supervisionada_v2_1.json"
 )
 
 
@@ -26,6 +32,59 @@ def _sha256(path: Path) -> str:
 
 
 class SelectionProtocolTests(unittest.TestCase):
+    def test_v2_groups_every_source_template_before_resampling(self) -> None:
+        config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        selection.validate_protocol_config(config)
+        dataset = ROOT / config["dataset"]["path"]
+        self.assertEqual(_sha256(dataset), config["dataset"]["sha256"])
+        self.assertEqual(
+            config["dataset"]["classification_group_field"],
+            "source_dependency_group_sha256",
+        )
+        self.assertEqual(
+            config["dataset"]["deduplication_group_field"],
+            "source_dependency_group_sha256",
+        )
+        forbidden = " ".join(config["dataset"]["forbidden_paths"])
+        self.assertIn("corpus_v3_teste.jsonl", forbidden)
+        self.assertIn("dataset_avaliacao_v2.jsonl", forbidden)
+
+        records = [
+            json.loads(line)
+            for line in dataset.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        classification = [
+            row for row in records if row["dimension"] == "CLASSIFICACAO"
+        ]
+        dedup_challenges = [
+            row
+            for row in records
+            if row["dimension"] == "DEDUPLICACAO"
+            and row.get("pair_role") == "CHALLENGE"
+        ]
+        class_groups = {
+            row["source_dependency_group_sha256"] for row in classification
+        }
+        dedup_groups = {
+            row["source_dependency_group_sha256"] for row in dedup_challenges
+        }
+        self.assertEqual(len(class_groups), 4 * 32)
+        self.assertEqual(len(dedup_groups), 12)
+
+        for rows, label_field in (
+            (classification, "expected_classification"),
+            (dedup_challenges, "expected_dedup"),
+        ):
+            labels_by_group: dict[str, set[object]] = {}
+            for row in rows:
+                labels_by_group.setdefault(
+                    row["source_dependency_group_sha256"], set()
+                ).add(row[label_field])
+            self.assertTrue(
+                all(len(labels) == 1 for labels in labels_by_group.values())
+            )
+
     def test_frozen_development_corpus_and_reserved_sets(self) -> None:
         config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         dataset = ROOT / config["dataset"]["path"]
@@ -36,15 +95,53 @@ class SelectionProtocolTests(unittest.TestCase):
         self.assertEqual(_sha256(dataset), config["dataset"]["sha256"])
         self.assertEqual(
             config["dataset"]["classification_group_field"],
-            "narrative_core_sha256",
+            "source_dependency_group_sha256",
         )
         self.assertEqual(
             config["dataset"]["deduplication_group_field"],
-            "episode_id",
+            "source_dependency_group_sha256",
         )
-        forbidden = " ".join(config["dataset"]["forbidden_paths"])
-        self.assertIn("corpus_v3_teste.jsonl", forbidden)
-        self.assertIn("dataset_avaliacao_v2.jsonl", forbidden)
+
+    def test_current_protocol_is_the_cli_and_launcher_default(self) -> None:
+        self.assertEqual(selection.DEFAULT_CONFIG.resolve(), CONFIG_PATH.resolve())
+        self.assertEqual(
+            result_validation.DEFAULT_CONFIG.resolve(), CONFIG_PATH.resolve()
+        )
+        launcher = (
+            ROOT / "avaliacao" / "scripts" / "executar_selecao_modelos.ps1"
+        ).read_text(encoding="utf-8-sig")
+        self.assertIn("selecao_modelos_supervisionados_v2.json", launcher)
+        self.assertIn("'--config'", launcher)
+        self.assertIn("$LASTEXITCODE", launcher)
+        self.assertIn("$ErrorActionPreference = 'Continue'", launcher)
+        self.assertIn("validar_viabilidade_protocolo_selecao.py", launcher)
+
+    def test_explicit_classification_scope_is_valid_and_dedup_remains_blocked(self) -> None:
+        config = json.loads(CLASSIFICATION_CONFIG_PATH.read_text(encoding="utf-8"))
+        selection.validate_protocol_config(config)
+        self.assertEqual(config["execution_tasks"], ["classification"])
+
+        invalid = dict(config)
+        invalid["execution_tasks"] = ["classification", "unknown"]
+        with self.assertRaises(selection.SelectionGuardError):
+            selection.validate_protocol_config(invalid)
+
+    def test_dedup_split_feasibility_fails_with_six_groups_per_class(self) -> None:
+        config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        labels: list[int] = []
+        groups: list[str] = []
+        for label in (0, 1):
+            for group_index in range(6):
+                labels.extend([label] * 10)
+                groups.extend([f"label-{label}-group-{group_index}"] * 10)
+
+        with self.assertRaises(selection.SelectionGuardError):
+            selection.validate_task_split_feasibility(
+                task="deduplication",
+                labels=labels,
+                groups=groups,
+                config=config,
+            )
 
     def test_requested_embeddings_representations_and_classifiers_are_frozen(
         self,

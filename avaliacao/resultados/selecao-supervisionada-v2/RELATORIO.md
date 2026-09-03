@@ -1,5 +1,13 @@
 # Seleção comparativa de embeddings e classificadores
 
+> **RESULTADO INVALIDADO EM 2026-08-26.** O corpus congelado desta execução
+> (`620a...`) não corresponde ao corpus versionado/regerável e o protocolo
+> separava, entre dobras, paráfrases e episódios produzidos pelas mesmas
+> famílias-fonte. Isso viola a independência exigida para interpretar os
+> intervalos por grupo. As tabelas abaixo são mantidas somente como trilha de
+> auditoria; seus números não podem justificar escolha de modelo, desempenho em
+> produção ou afirmação científica. Consulte `INVALIDADO.md`.
+
 > Status: seleção interna no corpus sintético de desenvolvimento. Este relatório não é validação confirmatória nem evidência de eficácia em produção.
 
 ## Integridade do protocolo

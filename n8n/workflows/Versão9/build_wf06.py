@@ -20,7 +20,7 @@ from helpers import (
 
 DIR = Path(__file__).resolve().parent
 OUTPUT = DIR / "V9-WF06-Fila-IA.json"
-SNAPSHOT_SHA256 = "1c6c07b857c8a676bc761b827404f4d0836271fa2b968b484f2d3c43c6c94070"
+SNAPSHOT_SHA256 = "6e52189ecd5d46dea985a0071e37540d652bcd0aaf5434378b5a2257e74189cc"
 
 
 def schedule_trigger():
@@ -79,8 +79,6 @@ def execute_wf02_node():
         "event": "ticket_queued_release",
         "ticket_id": "={{ $json.chamado.id }}",
         "id": "={{ $json.chamado.id }}",
-        "webhook_key": "={{ $json.webhook_key }}",
-        "key": "={{ $json.webhook_key }}",
         "chamado": "={{ $json.chamado }}",
     }
     return node
@@ -107,23 +105,9 @@ def execute_wf03_node():
 PREPARAR_ENTRADA_JS = r"""
 const raw = $input.first().json || {};
 const body = raw.body || raw;
-const query = raw.query || {};
-const headers = raw.headers || {};
-const expectedKey = String(
-  (typeof $env !== 'undefined' && $env.GLPI_WEBHOOK_KEY) ||
-  (typeof process !== 'undefined' && process.env.GLPI_WEBHOOK_KEY) || ''
-);
-const receivedKey = String(
-  body.webhook_key || body.key || query.webhook_key || query.key ||
-  headers['x-webhook-key'] || headers['X-Webhook-Key'] ||
-  headers['x-glpi-webhook-key'] || ''
-);
 const id = Number(body.ticket_id ?? body.items_id ?? body.id);
-const authorized = expectedKey.length > 0 && expectedKey !== 'CHANGE_ME' && receivedKey === expectedKey;
-if (!authorized) {
-  console.log('[WF06][LOG] Ingresso GLPI não autorizado ticket=' + (id || 'N/A'));
-  return [{json:{authorized:false, erro:true, codigo_http:401, mensagem:'Não autorizado'}}];
-}
+// O gateway n8n-gateway valida X-Webhook-Key antes de encaminhar este path.
+// O processo n8n não publica porta própria, portanto não existe rota de bypass.
 if (!Number.isInteger(id) || id <= 0) {
   console.log('[WF06][LOG] Ingresso GLPI sem ticket_id válido');
   return [{json:{authorized:false, erro:true, codigo_http:422, mensagem:'ticket_id inválido'}}];
@@ -304,6 +288,36 @@ reservas_expiradas AS (
     )
   RETURNING t.id
 ),
+experimentos_encerrados AS (
+  UPDATE tickets_processados t
+  SET triagem_status='EXPERIMENTO_ENCERRADO',
+      fila_liberar_em=NULL,
+      fila_reservada_em=NULL,
+      fila_ultimo_erro='Experimento encerrado; removido da fila operacional pelo WF06',
+      ultima_acao_workflow='WF06_QUARENTENA_EXPERIMENTO_ENCERRADO',
+      log_workflow=COALESCE(t.log_workflow,'[]'::jsonb) || jsonb_build_array(
+        jsonb_build_object(
+          'wf','WF06',
+          'acao','QUARENTENA_EXPERIMENTO_ENCERRADO',
+          'ts',NOW()
+        )
+      ),
+      atualizado_em=NOW()
+  WHERE t.triagem_status IN ('PENDENTE_FILA_IA','FILA_IA_LIBERADA')
+    AND EXISTS (
+      SELECT 1
+      FROM dataset_controle dc
+      WHERE dc.ticket_id=t.id AND dc.run_id IS NOT NULL
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM dataset_controle dc
+      JOIN experimentos_avaliacao e ON e.run_id=dc.run_id
+      WHERE dc.ticket_id=t.id
+        AND e.status IN ('EXECUTANDO','CALIBRANDO')
+    )
+  RETURNING t.id
+),
 controle AS (
   SELECT id,GREATEST(COALESCE(proxima_liberacao_em,NOW()),NOW()) AS base
   FROM fila_ia_controle
@@ -325,19 +339,10 @@ lote_efetivo AS (
     ELSE ${lote}
   END AS tamanho
 ),
-capacidade AS (
-  SELECT GREATEST((SELECT tamanho FROM lote_efetivo) - COUNT(*)::int,0)::int AS slots
+fila_elegivel AS MATERIALIZED (
+  SELECT t.id
   FROM tickets_processados t
-  WHERE t.triagem_status='FILA_IA_LIBERADA'
-    AND (
-      (SELECT run_scope FROM parametros) IS NULL
-      OR EXISTS (SELECT 1 FROM escopo_ids s WHERE s.ticket_id=t.id)
-    )
-),
-travados AS (
-  SELECT t.id,COALESCE(t.data_abertura,t.criado_em) AS ordem_data
-  FROM tickets_processados t
-  WHERE t.triagem_status='PENDENTE_FILA_IA'
+  WHERE t.triagem_status IN ('PENDENTE_FILA_IA','FILA_IA_LIBERADA')
     AND COALESCE(t.em_aprovacao_fiscal,FALSE)=FALSE
     AND (
       (
@@ -349,9 +354,6 @@ travados AS (
         AND COALESCE(t.status_num,4)=4
       )
     )
-    AND COALESCE(t.fila_enfileirada_em,t.criado_em)
-        <= NOW() - (${grace} || ' seconds')::interval
-    AND COALESCE(t.fila_disponivel_em,t.fila_enfileirada_em,t.criado_em) <= NOW()
     AND (
       (
         (SELECT run_scope FROM parametros) IS NOT NULL
@@ -381,6 +383,21 @@ travados AS (
         )
       )
     )
+),
+capacidade AS (
+  SELECT GREATEST((SELECT tamanho FROM lote_efetivo) - COUNT(*)::int,0)::int AS slots
+  FROM tickets_processados t
+  JOIN fila_elegivel e ON e.id=t.id
+  WHERE t.triagem_status='FILA_IA_LIBERADA'
+),
+travados AS (
+  SELECT t.id,COALESCE(t.data_abertura,t.criado_em) AS ordem_data
+  FROM tickets_processados t
+  JOIN fila_elegivel e ON e.id=t.id
+  WHERE t.triagem_status='PENDENTE_FILA_IA'
+    AND COALESCE(t.fila_enfileirada_em,t.criado_em)
+        <= NOW() - (${grace} || ' seconds')::interval
+    AND COALESCE(t.fila_disponivel_em,t.fila_enfileirada_em,t.criado_em) <= NOW()
   ORDER BY COALESCE(t.data_abertura,t.criado_em),t.id
   LIMIT (SELECT slots FROM capacidade)
   FOR UPDATE SKIP LOCKED
@@ -440,41 +457,29 @@ metricas AS (
     (
       SELECT COUNT(*)::int
       FROM tickets_processados t
+      JOIN fila_elegivel e ON e.id=t.id
       WHERE t.triagem_status='PENDENTE_FILA_IA'
-        AND (
-          (SELECT run_scope FROM parametros) IS NULL
-          OR EXISTS (SELECT 1 FROM escopo_ids s WHERE s.ticket_id=t.id)
-        )
     ),
     (
       SELECT COUNT(*)::int
       FROM tickets_processados t
+      JOIN fila_elegivel e ON e.id=t.id
       WHERE t.triagem_status='FILA_IA_LIBERADA'
-        AND (
-          (SELECT run_scope FROM parametros) IS NULL
-          OR EXISTS (SELECT 1 FROM escopo_ids s WHERE s.ticket_id=t.id)
-        )
     ),
     (SELECT COUNT(*)::int FROM marcados),
     (
       SELECT AVG(EXTRACT(EPOCH FROM (NOW()-COALESCE(t.fila_enfileirada_em,t.criado_em))))
       FROM tickets_processados t
+      JOIN fila_elegivel e ON e.id=t.id
       WHERE t.triagem_status IN ('PENDENTE_FILA_IA','FILA_IA_LIBERADA')
-        AND (
-          (SELECT run_scope FROM parametros) IS NULL
-          OR EXISTS (SELECT 1 FROM escopo_ids s WHERE s.ticket_id=t.id)
-        )
     ),
     (
       SELECT percentile_cont(0.95) WITHIN GROUP (
         ORDER BY EXTRACT(EPOCH FROM (NOW()-COALESCE(t.fila_enfileirada_em,t.criado_em)))
       )
       FROM tickets_processados t
+      JOIN fila_elegivel e ON e.id=t.id
       WHERE t.triagem_status IN ('PENDENTE_FILA_IA','FILA_IA_LIBERADA')
-        AND (
-          (SELECT run_scope FROM parametros) IS NULL
-          OR EXISTS (SELECT 1 FROM escopo_ids s WHERE s.ticket_id=t.id)
-        )
     ),
     ${intervalo},${lote}
   FROM (SELECT 1) base
@@ -492,7 +497,10 @@ contextualizados AS (
     dc.run_id AS experiment_run_id,
     COALESCE(dc.split,e.split) AS experiment_split,
     COALESCE(e.generation_config,'{}'::jsonb) AS experiment_generation_config,
-    COALESCE(e.generation_config->>'ia_fixed_model_role','PRIMARY') AS ia_fixed_model_role,
+    CASE
+      WHEN dc.run_id IS NULL THEN 'LOCAL'
+      ELSE e.generation_config->>'ia_fixed_model_role'
+    END AS ia_fixed_model_role,
     COALESCE(e.generation_config->>'ia_expected_model',e.modelo_ia) AS ia_expected_model,
     COALESCE(
       e.generation_config->>'ia_execution_mode',
@@ -538,14 +546,6 @@ if (typeof tickets === 'string') {
   try { tickets = JSON.parse(tickets); } catch { tickets = []; }
 }
 if (!Array.isArray(tickets)) tickets = [];
-const webhookKey = (() => {
-  const value = String(
-    (typeof $env !== 'undefined' && $env.GLPI_WEBHOOK_KEY) ||
-    (typeof process !== 'undefined' && process.env.GLPI_WEBHOOK_KEY) || ''
-  ).trim();
-  if (!value || value === 'CHANGE_ME') throw new Error('GLPI_WEBHOOK_KEY ausente');
-  return value;
-})();
 console.log('[WF06][LOG] Reservas liberadas no ciclo=' + tickets.length);
 if (tickets.length === 0) return [{json:{total_lote:0}}];
 return tickets.map((chamado,index) => ({
@@ -555,7 +555,6 @@ return tickets.map((chamado,index) => ({
     delay_seconds:Number(chamado.delay_seconds || 0),
     source:'wf06-fila-ia',
     event:'ticket_queued_release',
-    webhook_key:webhookKey,
     chamado:{...chamado,source:'wf06-fila-ia'}
   }
 }));

@@ -20,11 +20,12 @@ DEFAULT_MANIFEST = (
 DEFAULT_REFERENCE = ROOT / "avaliacao" / "datasets" / "corpus_v3_teste.jsonl"
 
 SEED = 20260818
-DATASET_VERSION = "desenvolvimento-local-v2.0.0"
+DATASET_VERSION = "desenvolvimento-local-v2.1.0"
 SCENARIO_SET = "DEV_LOCAL_V1"
 SPLIT = "DESENVOLVIMENTO"
 VARIATIONS = 5
 CLASSIFICATION_CORES_PER_CLASS = 80
+CLASSIFICATION_SOURCE_FAMILIES_PER_CLASS = 32
 DEDUP_EPISODES = 200
 DEDUP_CHALLENGES_PER_EPISODE = 5
 EXPECTED_TOTAL = 2800
@@ -96,9 +97,12 @@ POLICY_RULES = {
 }
 
 
-# Estes núcleos foram redigidos especificamente para o desenvolvimento local. Cada
-# especificação aparece em dois contextos físicos independentes e recebe cinco
-# realizações superficiais; nenhum texto é importado de corpus de avaliação.
+# Estes textos foram redigidos especificamente para desenvolvimento local. Há 80
+# especificações nominais por classe e cinco realizações superficiais por
+# especificação. As especificações 33--80 são paráfrases derivadas das 32
+# famílias-fonte iniciais; portanto elas NÃO são unidades estatísticas
+# independentes. O campo source_dependency_group_sha256, criado abaixo, mantém
+# cada família-fonte na mesma dobra. Nenhum texto é importado do corpus reservado.
 CLASSIFICATION_SPECS: dict[str, tuple[tuple[str, str, str, str], ...]] = {
     "OBRA": (
         ('Anexo para tutoria', 'construir um anexo com duas salas de tutoria', 'haverá fundação própria, cobertura nova e aumento da área edificada', 'Manutenção Predial'),
@@ -612,6 +616,7 @@ def common_record(
     occurrence: datetime,
     narrative_core: str,
     narrative_core_sha256: str,
+    source_dependency_group_sha256: str,
     template_family: str,
     category_wrong: bool,
 ) -> dict[str, Any]:
@@ -634,6 +639,7 @@ def common_record(
         "template_family": template_family,
         "narrative_core": narrative_core,
         "narrative_core_sha256": narrative_core_sha256,
+        "source_dependency_group_sha256": source_dependency_group_sha256,
         "surface_realization": f"DEV_R{order:02d}",
         "dataset_version": DATASET_VERSION,
         "scenario_set": SCENARIO_SET,
@@ -683,6 +689,20 @@ def classification_groups() -> list[list[dict[str, Any]]]:
                 }
                 narrative_core = f"DEV_CORE_CLS_{label}_{clean_title[:30]}"
                 core_hash = canonical_hash(core_payload)
+                variant_match = re.search(r"\(var\s+(\d+)\)", base_title, re.IGNORECASE)
+                source_family_index = (
+                    int(variant_match.group(1))
+                    % CLASSIFICATION_SOURCE_FAMILIES_PER_CLASS
+                    if variant_match
+                    else spec_index
+                )
+                source_dependency_hash = canonical_hash(
+                    {
+                        "dimension": "CLASSIFICACAO",
+                        "label": label,
+                        "source_family_index": source_family_index,
+                    }
+                )
                 group: list[dict[str, Any]] = []
                 for variation in range(VARIATIONS):
                     serial += 1
@@ -715,6 +735,7 @@ def classification_groups() -> list[list[dict[str, Any]]]:
                         occurrence=occurrence,
                         narrative_core=narrative_core,
                         narrative_core_sha256=core_hash,
+                        source_dependency_group_sha256=source_dependency_hash,
                         template_family=template_family,
                         category_wrong=category_wrong,
                     )
@@ -790,6 +811,13 @@ def dedup_groups(start_serial: int) -> list[list[dict[str, Any]]]:
         scenario_id = f"DEV_DD_{'POS' if duplicate else 'NEG'}_{episode_index + 1:03d}"
         episode_id = f"DEV_EP_DD_{episode_index + 1:03d}"
         template_family = f"DEV_TPL_DD_{family.upper()}_{episode_index + 1:03d}"
+        source_dependency_hash = canonical_hash(
+            {
+                "dimension": "DEDUPLICACAO",
+                "expected_dedup": duplicate,
+                "source_family": family,
+            }
+        )
         location = LOCATIONS[(episode_index * 5) % len(LOCATIONS)]
         other_location = LOCATIONS[(episode_index * 5 + 9) % len(LOCATIONS)]
         pair = dedup_pair_text(family, episode_index, location, other_location)
@@ -834,6 +862,7 @@ def dedup_groups(start_serial: int) -> list[list[dict[str, Any]]]:
             occurrence=anchor_occurrence,
             narrative_core=narrative_core,
             narrative_core_sha256=core_hash,
+            source_dependency_group_sha256=source_dependency_hash,
             template_family=template_family,
             category_wrong=False,
         )
@@ -892,6 +921,7 @@ def dedup_groups(start_serial: int) -> list[list[dict[str, Any]]]:
                 occurrence=occurrence,
                 narrative_core=narrative_core,
                 narrative_core_sha256=core_hash,
+                source_dependency_group_sha256=source_dependency_hash,
                 template_family=template_family,
                 category_wrong=category_wrong,
             )
@@ -952,11 +982,17 @@ def reference_identity(reference: Iterable[dict[str, Any]]) -> dict[str, set[str
         "scenario_id": set(),
         "template_family": set(),
         "narrative_core_sha256": set(),
+        "source_dependency_group_sha256": set(),
     }
     for record in reference:
         text_hash = str(record.get("visible_text_sha256", "") or "")
         result["visible_text_sha256"].add(text_hash or visible_hash(record))
-        for field in ("scenario_id", "template_family", "narrative_core_sha256"):
+        for field in (
+            "scenario_id",
+            "template_family",
+            "narrative_core_sha256",
+            "source_dependency_group_sha256",
+        ):
             value = str(record.get(field, "") or "")
             if value:
                 result[field].add(value)
@@ -986,20 +1022,43 @@ def validate_records(
             errors.append(f"registro confirmatório indevido em {record['case_id']}")
         if record.get("visible_text_sha256") != visible_hash(record):
             errors.append(f"hash textual inválido em {record['case_id']}")
+        dependency_group = str(
+            record.get("source_dependency_group_sha256", "") or ""
+        )
+        if not re.fullmatch(r"[0-9a-f]{64}", dependency_group):
+            errors.append(
+                f"grupo de dependência-fonte inválido em {record['case_id']}"
+            )
 
     classification = [r for r in records if r["dimension"] == "CLASSIFICACAO"]
     class_records = Counter(r["expected_classification"] for r in classification)
     class_cores: dict[str, set[str]] = defaultdict(set)
+    class_dependencies: dict[str, set[str]] = defaultdict(set)
+    dependency_labels: dict[str, set[str]] = defaultdict(set)
     variants_by_scenario: Counter[str] = Counter()
     for record in classification:
         class_cores[record["expected_classification"]].add(record["scenario_id"])
+        dependency = record["source_dependency_group_sha256"]
+        class_dependencies[record["expected_classification"]].add(dependency)
+        dependency_labels[dependency].add(record["expected_classification"])
         variants_by_scenario[record["scenario_id"]] += 1
     expected_per_class = CLASSIFICATION_CORES_PER_CLASS * VARIATIONS
     if class_records != Counter({label: expected_per_class for label in CLASSES}):
         errors.append(f"classificação desbalanceada: {dict(class_records)}")
     for label in CLASSES:
         if len(class_cores[label]) != CLASSIFICATION_CORES_PER_CLASS:
-            errors.append(f"{label}: núcleos independentes insuficientes")
+            errors.append(f"{label}: núcleos nominais insuficientes")
+        if (
+            len(class_dependencies[label])
+            != CLASSIFICATION_SOURCE_FAMILIES_PER_CLASS
+        ):
+            errors.append(
+                f"{label}: grupos de dependência-fonte "
+                f"{len(class_dependencies[label])} != "
+                f"{CLASSIFICATION_SOURCE_FAMILIES_PER_CLASS}"
+            )
+    if any(len(labels) != 1 for labels in dependency_labels.values()):
+        errors.append("grupo de dependência-fonte mistura classes de classificação")
     if any(count != VARIATIONS for count in variants_by_scenario.values()):
         errors.append("núcleo de classificação sem cinco variações")
 
@@ -1011,6 +1070,7 @@ def validate_records(
         errors.append(f"episódios dedup {len(episodes)} != {DEDUP_EPISODES}")
     challenge_labels: Counter[str] = Counter()
     family_episodes: Counter[str] = Counter()
+    dedup_dependency_labels: dict[str, set[str]] = defaultdict(set)
     for episode_id, members in episodes.items():
         ordered = sorted(members, key=lambda item: int(item["order_in_episode"]))
         if len(ordered) != 1 + DEDUP_CHALLENGES_PER_EPISODE:
@@ -1026,6 +1086,13 @@ def validate_records(
             challenge_labels[
                 "DUPLICADO" if challenge.get("expected_dedup") is True else "NAO_DUPLICADO"
             ] += 1
+            dedup_dependency_labels[
+                challenge["source_dependency_group_sha256"]
+            ].add(
+                "DUPLICADO"
+                if challenge.get("expected_dedup") is True
+                else "NAO_DUPLICADO"
+            )
     expected_challenges_per_label = DEDUP_EPISODES // 2 * DEDUP_CHALLENGES_PER_EPISODE
     if challenge_labels != Counter(
         {
@@ -1039,6 +1106,13 @@ def validate_records(
         count not in (16, 17) for count in family_episodes.values()
     ):
         errors.append(f"cobertura de famílias dedup inválida: {dict(family_episodes)}")
+    if len(dedup_dependency_labels) != len(expected_families):
+        errors.append(
+            "grupos de dependência-fonte dedup "
+            f"{len(dedup_dependency_labels)} != {len(expected_families)}"
+        )
+    if any(len(labels) != 1 for labels in dedup_dependency_labels.values()):
+        errors.append("grupo de dependência-fonte mistura rótulos de deduplicação")
 
     wrong_categories = sum(
         record.get("category_intentionally_incorrect") is True for record in records
@@ -1065,7 +1139,7 @@ def validate_records(
     if errors:
         raise ValueError("Corpus de desenvolvimento inválido:\n- " + "\n- ".join(errors))
     return {
-        "status": "PASSOU_VALIDACAO_ESTRUTURAL_E_ANTI_VAZAMENTO",
+        "status": "PASSOU_VALIDACAO_ESTRUTURAL_ANTI_VAZAMENTO_E_DEPENDENCIA",
         "visible_text_hash_overlap": 0,
         "scenario_id_overlap": 0,
         "template_family_overlap": 0,
@@ -1074,6 +1148,9 @@ def validate_records(
         "wrong_category_fraction": round(wrong_fraction, 6),
         "classification_records": len(classification),
         "classification_cores": sum(len(values) for values in class_cores.values()),
+        "classification_source_dependency_groups": sum(
+            len(values) for values in class_dependencies.values()
+        ),
         "dedup_records": len(dedup),
         "dedup_episodes": len(episodes),
         "dedup_challenges": sum(challenge_labels.values()),
@@ -1081,8 +1158,12 @@ def validate_records(
         "classification_cores_by_class": {
             label: len(class_cores[label]) for label in CLASSES
         },
+        "classification_source_dependency_groups_by_class": {
+            label: len(class_dependencies[label]) for label in CLASSES
+        },
         "dedup_challenges_by_label": dict(sorted(challenge_labels.items())),
         "dedup_episodes_by_family": dict(sorted(family_episodes.items())),
+        "dedup_source_dependency_groups": len(dedup_dependency_labels),
     }
 
 
@@ -1146,10 +1227,15 @@ def build_manifest(
             ],
         },
         "grouping_policy": {
-            "group_field": "scenario_id",
+            "classification_group_field": "source_dependency_group_sha256",
+            "deduplication_group_field": "source_dependency_group_sha256",
             "classification_variations_per_core": VARIATIONS,
             "dedup_challenges_per_episode": DEDUP_CHALLENGES_PER_EPISODE,
-            "split_requirement": "Todas as realizações do mesmo núcleo/episódio permanecem juntas.",
+            "split_requirement": (
+                "Todas as realizações e paráfrases derivadas da mesma família-fonte "
+                "permanecem juntas; episódios dedup que reutilizam o mesmo molde "
+                "também permanecem juntos."
+            ),
         },
         "files": {
             "jsonl": {"path": artifact_path(output), "sha256": sha256_file(output)},
@@ -1163,7 +1249,9 @@ def build_manifest(
             },
         },
         "limitations": [
-            "As variações do mesmo núcleo não são observações independentes.",
+            "As variações e paráfrases da mesma família-fonte não são observações independentes.",
+            "Os 200 episódios dedup reutilizam 12 famílias-fonte; o n efetivo para inferência agrupada é 12, não 200.",
+            "As 80 especificações nominais por classe derivam de 32 famílias-fonte; o n efetivo máximo por classe é 32.",
             "Categorias GLPI foram intencionalmente corrompidas em uma fração dos registros.",
             "Os rótulos derivam das regras documentais e ainda são piloto, não padrão-ouro confirmatório.",
             "O corpus não contém chamados reais e não representa a frequência cotidiana das classes.",

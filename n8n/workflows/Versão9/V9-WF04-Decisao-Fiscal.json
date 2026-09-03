@@ -20,7 +20,7 @@
     },
     {
       "parameters": {
-        "jsCode": "\nconst q={...($json.query || {}),...($json.body || {})};\nconst headers=$json.headers || {};\nconst dec=String(q.decisao ?? '').toLowerCase().trim();\nconst cid=Number(q.chamado_id);\nconst rid=Number(q.ref_id || 0);\nconst token=String(q.token || '').trim();\nconst fonte=String(q.fonte || '').toUpperCase().trim();\nconst oraculo=fonte==='ORACULO_GABARITO';\nconst runId=String(q.run_id || headers['x-test-run-id'] || '').trim();\nconst scenarioId=String(q.scenario_id || headers['x-test-scenario-id'] || '').trim();\nconst realizationId=String(q.realization_id || headers['x-test-realization-id'] || '').trim();\nconst nonce=String(headers['x-test-auto-review-nonce'] || '').trim();\nconst receivedSecret=String(headers['x-test-auto-review-token'] || '').trim();\nconst expectedSecret=String(\n  (typeof $env!=='undefined' && $env.TEST_AUTO_REVIEW_TOKEN) ||\n  (typeof process!=='undefined' && process.env.TEST_AUTO_REVIEW_TOKEN) || ''\n);\nconst flag=name=>{\n  let value='';\n  try { value=String((typeof $env!=='undefined' && $env[name]) || (typeof process!=='undefined' && process.env[name]) || ''); } catch(e) {}\n  return value.trim().toLowerCase()==='true';\n};\nfunction sameSecret(a,b){\n  if(a.length!==b.length || a.length<32) return false;\n  let diff=0; for(let i=0;i<a.length;i++) diff|=a.charCodeAt(i)^b.charCodeAt(i);\n  return diff===0;\n}\nconst idsOk=/^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/.test(runId)\n  && /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(scenarioId)\n  && /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/.test(realizationId);\nconst oracleAuthOk=!oraculo || (\n  flag('TEST_MODE') && flag('TEST_AUTO_HUMAN_CONFIRMATION') &&\n  sameSecret(expectedSecret,receivedSecret) && /^[a-f0-9]{32}$/i.test(nonce) && idsOk\n);\nconst temChamado=Number.isFinite(cid) && cid>0;\nconst decisaoValida=['confirmar','nao_duplicado'].includes(dec);\nconst tokenValidoFormato=/^[a-f0-9]{32,128}$/i.test(token);\nconst ok=temChamado && decisaoValida && tokenValidoFormato && oracleAuthOk;\nlet motivo_invalidade='';\nif(!temChamado) motivo_invalidade='chamado_id ausente ou invalido';\nelse if(!decisaoValida) motivo_invalidade='decisao ausente ou invalida: '+(dec||'vazia');\nelse if(!tokenValidoFormato) motivo_invalidade='token fiscal ausente ou invalido';\nelse if(!oracleAuthOk) motivo_invalidade='origem ORACULO_GABARITO nao autorizada';\nconsole.log('[WF04][LOG] decisao='+dec+' chamado='+cid+' origem='+(oraculo?'ORACULO_GABARITO':'FISCAL_GLPI')+' ok='+ok);\nreturn [{json:{\n  ok,decisao:dec,chamado_id:temChamado?cid:null,ref_id:rid>0?rid:null,\n  token:tokenValidoFormato?token:null,motivo_invalidade,\n  origem_decisao:oraculo?'ORACULO_GABARITO':'FISCAL_GLPI',oraculo,\n  run_id:oraculo?runId:null,scenario_id:oraculo?scenarioId:null,\n  realization_id:oraculo?realizationId:null,assessor_nonce:oraculo?nonce:null\n}}];\n"
+        "jsCode": "\nconst q={...($json.query || {}),...($json.body || {})};\nconst headers=$json.headers || {};\nconst dec=String(q.decisao ?? '').toLowerCase().trim();\nconst cid=Number(q.chamado_id);\nconst rid=Number(q.ref_id || 0);\nconst token=String(q.token || '').trim();\nconst fonte=String(q.fonte || '').toUpperCase().trim();\nconst oraculo=fonte==='ORACULO_GABARITO';\nconst runId=String(q.run_id || headers['x-test-run-id'] || '').trim();\nconst scenarioId=String(q.scenario_id || headers['x-test-scenario-id'] || '').trim();\nconst realizationId=String(q.realization_id || headers['x-test-realization-id'] || '').trim();\nconst nonce=String(headers['x-test-auto-review-nonce'] || '').trim();\nconst receivedSecret=String(headers['x-test-auto-review-token'] || '').trim();\nconst expectedSecret=String(\n  (typeof process!=='undefined' && undefined) ||\n  (typeof process!=='undefined' && undefined) || ''\n);\nconst flag=name=>{\n  let value='';\n  try { value=String((typeof process!=='undefined' && undefined) || (typeof process!=='undefined' && undefined) || ''); } catch(e) {}\n  return value.trim().toLowerCase()==='true';\n};\nfunction sameSecret(a,b){\n  if(a.length!==b.length || a.length<32) return false;\n  let diff=0; for(let i=0;i<a.length;i++) diff|=a.charCodeAt(i)^b.charCodeAt(i);\n  return diff===0;\n}\nconst idsOk=/^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/.test(runId)\n  && /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(scenarioId)\n  && /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/.test(realizationId);\nconst oracleAuthOk=!oraculo || (\n  flag('TEST_MODE') && flag('TEST_AUTO_HUMAN_CONFIRMATION') &&\n  sameSecret(expectedSecret,receivedSecret) && /^[a-f0-9]{32}$/i.test(nonce) && idsOk\n);\nconst temChamado=Number.isFinite(cid) && cid>0;\nconst decisaoValida=['confirmar','nao_duplicado'].includes(dec);\nconst tokenValidoFormato=/^[a-f0-9]{32,128}$/i.test(token);\nconst ok=temChamado && decisaoValida && tokenValidoFormato && oracleAuthOk;\nlet motivo_invalidade='';\nif(!temChamado) motivo_invalidade='chamado_id ausente ou invalido';\nelse if(!decisaoValida) motivo_invalidade='decisao ausente ou invalida: '+(dec||'vazia');\nelse if(!tokenValidoFormato) motivo_invalidade='token fiscal ausente ou invalido';\nelse if(!oracleAuthOk) motivo_invalidade='origem ORACULO_GABARITO nao autorizada';\nconsole.log('[WF04][LOG] decisao='+dec+' chamado='+cid+' origem='+(oraculo?'ORACULO_GABARITO':'FISCAL_GLPI')+' ok='+ok);\nreturn [{json:{\n  ok,decisao:dec,chamado_id:temChamado?cid:null,ref_id:rid>0?rid:null,\n  token:tokenValidoFormato?token:null,motivo_invalidade,\n  origem_decisao:oraculo?'ORACULO_GABARITO':'FISCAL_GLPI',oraculo,\n  run_id:oraculo?runId:null,scenario_id:oraculo?scenarioId:null,\n  realization_id:oraculo?realizationId:null,assessor_nonce:oraculo?nonce:null\n}}];\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -98,19 +98,10 @@
     },
     {
       "parameters": {
-        "url": "={{ ($env.GLPI_API_URL || 'http://host.docker.internal:9080/apirest.php') + '/initSession' }}",
+        "url": "={{ ('http://glpi-credential-proxy:8080/apirest.php' || 'http://host.docker.internal:9080/apirest.php') + '/initSession' }}",
         "sendHeaders": true,
         "headerParameters": {
-          "parameters": [
-            {
-              "name": "App-Token",
-              "value": "={{ (() => { const value = String($env.GLPI_APP_TOKEN || '').trim(); if (!value || value === 'CHANGE_ME') { throw new Error('GLPI_APP_TOKEN ausente'); } return value; })() }}"
-            },
-            {
-              "name": "Authorization",
-              "value": "={{ (() => { const value = String($env.GLPI_AUTH_BASIC || '').trim(); if (!value || value === 'CHANGE_ME') { throw new Error('GLPI_AUTH_BASIC ausente'); } return value; })() }}"
-            }
-          ]
+          "parameters": []
         },
         "options": {}
       },
@@ -130,14 +121,10 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ ($env.GLPI_API_URL || 'http://host.docker.internal:9080/apirest.php') + '/ITILFollowup' }}",
+        "url": "={{ ('http://glpi-credential-proxy:8080/apirest.php' || 'http://host.docker.internal:9080/apirest.php') + '/ITILFollowup' }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "App-Token",
-              "value": "={{ (() => { const value = String($env.GLPI_APP_TOKEN || '').trim(); if (!value || value === 'CHANGE_ME') { throw new Error('GLPI_APP_TOKEN ausente'); } return value; })() }}"
-            },
             {
               "name": "Session-Token",
               "value": "={{ $('GLPI: Sessão Link Inválido').first().json.session_token }}"
@@ -196,14 +183,10 @@
     },
     {
       "parameters": {
-        "url": "={{ ($env.GLPI_API_URL || 'http://host.docker.internal:9080/apirest.php') + '/killSession' }}",
+        "url": "={{ ('http://glpi-credential-proxy:8080/apirest.php' || 'http://host.docker.internal:9080/apirest.php') + '/killSession' }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "App-Token",
-              "value": "={{ (() => { const value = String($env.GLPI_APP_TOKEN || '').trim(); if (!value || value === 'CHANGE_ME') { throw new Error('GLPI_APP_TOKEN ausente'); } return value; })() }}"
-            },
             {
               "name": "Session-Token",
               "value": "={{ $('GLPI: Sessão Link Inválido').first().json.session_token }}"
@@ -281,19 +264,10 @@
     },
     {
       "parameters": {
-        "url": "={{ ($env.GLPI_API_URL || 'http://host.docker.internal:9080/apirest.php') + '/initSession' }}",
+        "url": "={{ ('http://glpi-credential-proxy:8080/apirest.php' || 'http://host.docker.internal:9080/apirest.php') + '/initSession' }}",
         "sendHeaders": true,
         "headerParameters": {
-          "parameters": [
-            {
-              "name": "App-Token",
-              "value": "={{ (() => { const value = String($env.GLPI_APP_TOKEN || '').trim(); if (!value || value === 'CHANGE_ME') { throw new Error('GLPI_APP_TOKEN ausente'); } return value; })() }}"
-            },
-            {
-              "name": "Authorization",
-              "value": "={{ (() => { const value = String($env.GLPI_AUTH_BASIC || '').trim(); if (!value || value === 'CHANGE_ME') { throw new Error('GLPI_AUTH_BASIC ausente'); } return value; })() }}"
-            }
-          ]
+          "parameters": []
         },
         "options": {}
       },
@@ -487,14 +461,10 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ ($env.GLPI_API_URL || 'http://host.docker.internal:9080/apirest.php') + '/ITILFollowup' }}",
+        "url": "={{ ('http://glpi-credential-proxy:8080/apirest.php' || 'http://host.docker.internal:9080/apirest.php') + '/ITILFollowup' }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "App-Token",
-              "value": "={{ (() => { const value = String($env.GLPI_APP_TOKEN || '').trim(); if (!value || value === 'CHANGE_ME') { throw new Error('GLPI_APP_TOKEN ausente'); } return value; })() }}"
-            },
             {
               "name": "Session-Token",
               "value": "={{ $('GLPI: Sessão Fiscal').first().json.session_token }}"
@@ -528,14 +498,10 @@
     {
       "parameters": {
         "method": "PUT",
-        "url": "={{ ($env.GLPI_API_URL || 'http://host.docker.internal:9080/apirest.php') + '/Ticket/' + $('Validar Fiscal').first().json.id }}",
+        "url": "={{ ('http://glpi-credential-proxy:8080/apirest.php' || 'http://host.docker.internal:9080/apirest.php') + '/Ticket/' + $('Validar Fiscal').first().json.id }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "App-Token",
-              "value": "={{ (() => { const value = String($env.GLPI_APP_TOKEN || '').trim(); if (!value || value === 'CHANGE_ME') { throw new Error('GLPI_APP_TOKEN ausente'); } return value; })() }}"
-            },
             {
               "name": "Session-Token",
               "value": "={{ $('GLPI: Sessão Fiscal').first().json.session_token }}"
@@ -591,14 +557,10 @@
     },
     {
       "parameters": {
-        "url": "={{ ($env.GLPI_API_URL || 'http://host.docker.internal:9080/apirest.php') + '/killSession' }}",
+        "url": "={{ ('http://glpi-credential-proxy:8080/apirest.php' || 'http://host.docker.internal:9080/apirest.php') + '/killSession' }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "App-Token",
-              "value": "={{ (() => { const value = String($env.GLPI_APP_TOKEN || '').trim(); if (!value || value === 'CHANGE_ME') { throw new Error('GLPI_APP_TOKEN ausente'); } return value; })() }}"
-            },
             {
               "name": "Session-Token",
               "value": "={{ $('GLPI: Sessão Fiscal').first().json.session_token }}"
@@ -686,7 +648,7 @@
     },
     {
       "parameters": {
-        "jsCode": "\nconst r = $('PG: Limpar Duplicidade').first().json;\nconst origem = $('Validar Fiscal').first().json || {};\nconst token = String(origem.fiscal_decision_token || '').trim();\nconst marker = token ? `[WF02_DUPLICIDADE:${origem.id || r.id}:${token}]` : '';\nconst baseUrl = String(((typeof $env !== 'undefined' && $env.GLPI_API_URL) || (typeof process !== 'undefined' && process.env.GLPI_API_URL)) || 'http://host.docker.internal:9080/apirest.php').replace(/\\/$/, '');\nconst appToken = (() => { const value = String(((typeof $env !== 'undefined' && $env.GLPI_APP_TOKEN) || (typeof process !== 'undefined' && process.env.GLPI_APP_TOKEN)) || '').trim(); if (!value || value === 'CHANGE_ME') throw new Error('GLPI_APP_TOKEN ausente'); return value; })();\nconst sessionToken = (() => { const value = String($('GLPI: Sessão Fiscal').first().json.session_token || '').trim(); if (!value) throw new Error('GLPI session_token ausente'); return value; })();\nconst headers = {'App-Token': appToken, 'Session-Token': sessionToken, 'Content-Type': 'application/json'};\nlet removidos = 0;\nlet falhas = 0;\ntry {\n  const followups = await helpers.httpRequest({\n    method: 'GET',\n    url: baseUrl + '/Ticket/' + Number(r.id) + '/ITILFollowup',\n    headers,\n    json: true\n  });\n  const candidatos = [];\n  for (const f of Array.isArray(followups) ? followups : []) {\n    const fid = Number(f.id || f['2']);\n    const content = String(f.content || f['content'] || '');\n    const criadoPelaTriagem = marker && content.includes(marker);\n    if (!fid || !criadoPelaTriagem) continue;\n    candidatos.push(fid);\n  }\n  const resultados = await Promise.all(candidatos.map(async (fid) => {\n    try {\n      await helpers.httpRequest({\n        method: 'DELETE',\n        url: baseUrl + '/ITILFollowup/' + fid,\n        headers,\n        json: true\n      });\n      return {fid, ok:true};\n    } catch (e) {\n      console.log('[WF04][LOG] Falha ao remover followup #' + fid + ' do chamado #' + r.id + ': ' + e.message);\n      return {fid, ok:false};\n    }\n  }));\n  removidos = resultados.filter(x => x.ok).length;\n  falhas = resultados.length - removidos;\n} catch (e) {\n  console.log('[WF04][LOG] Falha ao remover followups de duplicidade #' + r.id + ': ' + e.message);\n}\nconsole.log('[WF04][LOG] Followups de duplicidade removidos #' + r.id + ': ' + removidos + ' | falhas=' + falhas + ' | marker=' + (marker ? 'ok' : 'ausente'));\nreturn [{json:{...r,followups_removidos:removidos,followups_remocao_falhas:falhas,marcador_followup:marker}}];\n"
+        "jsCode": "\nconst r = $('PG: Limpar Duplicidade').first().json;\nconst origem = $('Validar Fiscal').first().json || {};\nconst token = String(origem.fiscal_decision_token || '').trim();\nconst marker = token ? `[WF02_DUPLICIDADE:${origem.id || r.id}:${token}]` : '';\nconst baseUrl = String((typeof process !== 'undefined' && 'http://glpi-credential-proxy:8080/apirest.php') || 'http://host.docker.internal:9080/apirest.php').replace(/\\/$/, '');\nconst appToken = '';\nconst sessionToken = (() => { const value = String($('GLPI: Sessão Fiscal').first().json.session_token || '').trim(); if (!value) throw new Error('GLPI session_token ausente'); return value; })();\nconst headers = {'Session-Token': sessionToken, 'Content-Type': 'application/json'};\nlet removidos = 0;\nlet falhas = 0;\ntry {\n  const followups = await helpers.httpRequest({\n    method: 'GET',\n    url: baseUrl + '/Ticket/' + Number(r.id) + '/ITILFollowup',\n    headers,\n    json: true\n  });\n  const candidatos = [];\n  for (const f of Array.isArray(followups) ? followups : []) {\n    const fid = Number(f.id || f['2']);\n    const content = String(f.content || f['content'] || '');\n    const criadoPelaTriagem = marker && content.includes(marker);\n    if (!fid || !criadoPelaTriagem) continue;\n    candidatos.push(fid);\n  }\n  const resultados = await Promise.all(candidatos.map(async (fid) => {\n    try {\n      await helpers.httpRequest({\n        method: 'DELETE',\n        url: baseUrl + '/ITILFollowup/' + fid,\n        headers,\n        json: true\n      });\n      return {fid, ok:true};\n    } catch (e) {\n      console.log('[WF04][LOG] Falha ao remover followup #' + fid + ' do chamado #' + r.id + ': ' + e.message);\n      return {fid, ok:false};\n    }\n  }));\n  removidos = resultados.filter(x => x.ok).length;\n  falhas = resultados.length - removidos;\n} catch (e) {\n  console.log('[WF04][LOG] Falha ao remover followups de duplicidade #' + r.id + ': ' + e.message);\n}\nconsole.log('[WF04][LOG] Followups de duplicidade removidos #' + r.id + ': ' + removidos + ' | falhas=' + falhas + ' | marker=' + (marker ? 'ok' : 'ausente'));\nreturn [{json:{...r,followups_removidos:removidos,followups_remocao_falhas:falhas,marcador_followup:marker}}];\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -701,14 +663,10 @@
     {
       "parameters": {
         "method": "PUT",
-        "url": "={{ ($env.GLPI_API_URL || 'http://host.docker.internal:9080/apirest.php') + '/Ticket/' + $('PG: Limpar Duplicidade').first().json.id }}",
+        "url": "={{ ('http://glpi-credential-proxy:8080/apirest.php' || 'http://host.docker.internal:9080/apirest.php') + '/Ticket/' + $('PG: Limpar Duplicidade').first().json.id }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "App-Token",
-              "value": "={{ (() => { const value = String($env.GLPI_APP_TOKEN || '').trim(); if (!value || value === 'CHANGE_ME') { throw new Error('GLPI_APP_TOKEN ausente'); } return value; })() }}"
-            },
             {
               "name": "Session-Token",
               "value": "={{ $('GLPI: Sessão Fiscal').first().json.session_token }}"
@@ -742,14 +700,10 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ ($env.GLPI_API_URL || 'http://host.docker.internal:9080/apirest.php') + '/ITILFollowup' }}",
+        "url": "={{ ('http://glpi-credential-proxy:8080/apirest.php' || 'http://host.docker.internal:9080/apirest.php') + '/ITILFollowup' }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "App-Token",
-              "value": "={{ (() => { const value = String($env.GLPI_APP_TOKEN || '').trim(); if (!value || value === 'CHANGE_ME') { throw new Error('GLPI_APP_TOKEN ausente'); } return value; })() }}"
-            },
             {
               "name": "Session-Token",
               "value": "={{ $('GLPI: Sessão Fiscal').first().json.session_token }}"
@@ -782,14 +736,10 @@
     },
     {
       "parameters": {
-        "url": "={{ ($env.GLPI_API_URL || 'http://host.docker.internal:9080/apirest.php') + '/killSession' }}",
+        "url": "={{ ('http://glpi-credential-proxy:8080/apirest.php' || 'http://host.docker.internal:9080/apirest.php') + '/killSession' }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "App-Token",
-              "value": "={{ (() => { const value = String($env.GLPI_APP_TOKEN || '').trim(); if (!value || value === 'CHANGE_ME') { throw new Error('GLPI_APP_TOKEN ausente'); } return value; })() }}"
-            },
             {
               "name": "Session-Token",
               "value": "={{ $('GLPI: Sessão Fiscal').first().json.session_token }}"
@@ -853,14 +803,10 @@
     },
     {
       "parameters": {
-        "url": "={{ ($env.GLPI_API_URL || 'http://host.docker.internal:9080/apirest.php') + '/killSession' }}",
+        "url": "={{ ('http://glpi-credential-proxy:8080/apirest.php' || 'http://host.docker.internal:9080/apirest.php') + '/killSession' }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "App-Token",
-              "value": "={{ (() => { const value = String($env.GLPI_APP_TOKEN || '').trim(); if (!value || value === 'CHANGE_ME') { throw new Error('GLPI_APP_TOKEN ausente'); } return value; })() }}"
-            },
             {
               "name": "Session-Token",
               "value": "={{ $('GLPI: Sessão Fiscal').first().json.session_token }}"
@@ -924,14 +870,10 @@
     },
     {
       "parameters": {
-        "url": "={{ ($env.GLPI_API_URL || 'http://host.docker.internal:9080/apirest.php') + '/killSession' }}",
+        "url": "={{ ('http://glpi-credential-proxy:8080/apirest.php' || 'http://host.docker.internal:9080/apirest.php') + '/killSession' }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "App-Token",
-              "value": "={{ (() => { const value = String($env.GLPI_APP_TOKEN || '').trim(); if (!value || value === 'CHANGE_ME') { throw new Error('GLPI_APP_TOKEN ausente'); } return value; })() }}"
-            },
             {
               "name": "Session-Token",
               "value": "={{ $('GLPI: Sessão Fiscal').first().json.session_token }}"

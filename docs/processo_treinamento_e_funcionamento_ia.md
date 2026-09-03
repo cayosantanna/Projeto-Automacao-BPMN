@@ -1,104 +1,98 @@
-# Processo Detalhado de Treinamento e Funcionamento da Inteligência Artificial
+# Processo de treinamento e funcionamento da IA
 
-**Projeto:** Automação de Triagem e Classificação de Chamados GLPI com Múltiplos Modelos de IA  
-**Data:** 18 de Agosto de 2026
+**Revisão:** 26/08/2026
 
----
+## O que é treinado
 
-## 1. Visão Geral do Pipeline de Treinamento e Inferência
+O projeto não treina uma LLM do zero. O Granite Embedding 97M é um modelo
+pré-treinado e congelado. Sobre seus vetores e os atributos TF-IDF, o projeto
+treina classificadores supervisionados de menor porte e calibra seus escores.
 
-O pipeline de Inteligência Artificial do projeto foi projetado para operar com alta precisão semântica e baixa latência de inferência em CPU (FP32), utilizando uma arquitetura híbrida que combina extração léxica esparsa e extração semântica densa.
+O bundle operacional `local-hybrid-v1.8.0` já foi ajustado e congelado, mas
+isso não significa “treinamento científico concluído”. A classificação
+comparativa V2.1 terminou apenas em desenvolvimento sintético, sem vencedor
+qualificado; deduplicação, gabarito independente e holdout institucional ainda
+estão pendentes.
 
-```mermaid
-graph TD
-    A["Texto Bruto do Chamado<br/>(Título + Descrição + Local)"] --> B1["Pré-Processamento Léxico<br/>(TF-IDF Palavras + Chars)"]
-    A --> B2["Embedding Semântico<br/>(IBM Granite 97M FP32)"]
-    B1 --> C["Vetor Híbrido Concatenado<br/>(Esparso + Denso 384d)"]
-    B2 --> C
-    C --> D["Classificador Base<br/>(Linear SVM / LogReg)"]
-    D --> E["Calibrador de Probabilidades<br/>(CalibratedClassifierCV)"]
-    E --> F["Mecanismo de Limiares Assimétricos<br/>(Abstenção / Confiança)"]
-    F --> G["Decisão Final e Encaminhamento<br/>(OBRA / DEMO / SOB_DEMANDA / MANUAL)"]
+## Pipeline de desenvolvimento
+
+1. **Definição da tarefa:** classificação em OBRA, DEMO, SOB_DEMANDA ou
+   TRIAGEM_MANUAL; deduplicação em DUPLICADO/NAO_DUPLICADO com abstenção.
+2. **Unidade e grupo:** cada registro recebe uma família-fonte; todos os
+   derivados dessa fonte ficam na mesma dobra.
+3. **Normalização:** título, descrição, local e metadados permitidos são
+   normalizados sem usar campos que vazem o rótulo.
+4. **Representação:** TF-IDF de palavras/caracteres, embedding ou fusão.
+5. **Ajuste interno:** hiperparâmetros são escolhidos somente nas dobras
+   internas do desenvolvimento.
+6. **Calibração:** predições fora de dobra ajustam a sigmoide; nunca o holdout.
+7. **Política seletiva:** limiares transformam probabilidade em ação automática
+   ou revisão humana, respeitando custos assimétricos.
+8. **Avaliação externa:** a dobra externa estima desempenho interno sem usar a
+   própria unidade-fonte no treino.
+9. **Congelamento:** config, dataset, código, dependências, bundle, manifesto,
+   embedding/revisão e hashes são registrados.
+10. **Holdout:** somente depois da seleção, o candidato congelado é executado
+    uma vez em dados institucionais intocados.
+
+## Comparação V2.1
+
+São avaliados três embeddings (Granite, E5-small e MiniLM multilíngue), cinco
+representações aplicáveis e cinco classificadores (logística, árvore, SVM,
+MLP, XGBoost). As ablações isolam o valor incremental de TF-IDF, embedding e
+metadados. O ranking segue gates de segurança e só depois usa desempenho.
+
+O corpus completo tem 128 famílias-fonte de classificação, mas o estrato
+efetivamente submetido ao classificador contém 1.114 registros e 111 famílias.
+A deduplicação tem somente 12 famílias. A segunda tarefa é inviável no desenho
+atual; a evidência classificatória serve para desenvolvimento, não para concluir
+eficácia real.
+
+## Inferência em operação
+
+```text
+GLPI
+  → WF06 autentica/enfileira/reserva
+  → WF02 consulta candidatos e decide deduplicação
+  → WF03 classifica quando não há duplicidade automática
+  → regra de segurança/abstenção
+  → ação GLPI ou revisão humana
+  → PostgreSQL registra tentativa, decisão, evento e proveniência
 ```
 
----
+O runtime verifica versão/hash do bundle e do embedding. Em experimento, modelo
+e papel devem coincidir com o protocolo; fallback falha fechado. Em operação,
+o fallback só ocorre segundo a política configurada e toda tentativa é
+auditada.
 
-## 2. Etapa 1: Pré-Processamento e Engenharia de Atributos
+## Diagnóstico de acertos
 
-### 2.1. Extração Léxica (TF-IDF Esparso)
-* **TF-IDF de Palavras:** Extração de unigramas e bigramas com ponderação sublinear de frequência de termo (`sublinear_tf=True`), limite de frequência mínima (`min_df=2`) e remoção de *stopwords* customizadas para manutenção predial.
-* **TF-IDF de Caracteres:** Extração de n-gramas de caracteres (faixa de 3 a 5 caracteres) para conferir robustez contra erros ortográficos, abreviações técnicas ("lab", "ar-cond", "qd") e variações morfológicas.
+O diagnóstico correto não é uma taxa única. Deve separar:
 
-### 2.2. Extração Semântica Densa (IBM Granite 97M)
-* **Modelo Base:** `ibm-granite/granite-embedding-97m-multilingual-r2`.
-* **Dimensão:** Vetor de 384 dimensões em ponto flutuante de precisão simples (FP32).
-* **Pooling:** *Mean pooling* sobre os tokens de saída da última camada do transformador, seguido de normalização L2 euclidiana ($\|v\|_2 = 1$).
-* **Execução:** Otimizado em PyTorch puro para execução local na CPU, sem necessidade de GPU em produção.
+- disponibilidade de transporte;
+- cobertura semântica e automática;
+- erro nos casos cobertos e erro global;
+- classe, cenário, completude e origem da decisão;
+- deduplicação: recuperação de candidatos versus decisão final;
+- gates determinísticos versus saída probabilística;
+- calibração, latência e consumo de memória.
 
-### 2.3. Fusão Híbrida de Atributos
-Os vetores de atributos léxicos ($X_{\text{tfidf}} \in \mathbb{R}^{d_1}$) e os vetores semânticos densos ($X_{\text{embed}} \in \mathbb{R}^{384}$) são concatenados em uma matriz esparsa balanceada:
+Predições precisam ser comparadas a gabarito humano independente. Sem gabarito,
+um log de decisão demonstra execução, não acerto.
 
-$$X_{\text{híbrido}} = [X_{\text{tfidf}} \;\|\; X_{\text{embed}}]$$
+## XAI e monitoramento
 
-Essa fusão permite que o classificador explore simultaneamente termos de alta especificidade (códigos de salas, equipamentos) e o sentido semântico global da narrativa.
+SHAP ajuda a localizar sinais espúrios e explicar o escore do finalista, mas
+não valida a decisão. Em produção, monitorar distribuição de texto, cobertura,
+abstenção, erros adjudicados, latência, falhas, drift e mudanças de versão.
+Queda de cobertura ou aumento de risco deve reduzir automação, não disparar
+retreinamento automático sem revisão.
 
----
+## Estado atual
 
-## 3. Etapa 2: Formulação Algorítmica e Treinamento dos Modelos
-
-Durante a seleção supervisionada, foram testadas 5 famílias de classificadores:
-
-### 3.1. Linear SVM (Máquinas de Vetores de Suporte Linear) - *Modelo Campeão*
-Minimiza a função de perda *Hinge Loss* com regularização L2:
-
-$$\min_{w, b} \frac{1}{2} \|w\|^2 + C \sum_{i=1}^N \max(0, 1 - y_i (w^T x_i + b))$$
-
-* **Por que venceu:** Alta capacidade de generalização em espaços de alta dimensionalidade gerados pela fusão de TF-IDF e embeddings, mantendo separabilidade linear nítida com margem máxima de segurança e baixíssimo custo computacional de inferência.
-
-### 3.2. Regressão Logística Multinomial com Regularização L2
-Utilizada como classificador e como modelo campeão na tarefa de deduplicação par-a-par:
-
-$$P(y = c \mid x) = \frac{e^{w_c^T x + b_c}}{\sum_{j=1}^K e^{w_j^T x + b_j}}$$
-
-* **Vantagem:** Estimativas de probabilidade suaves e convexidade garantida na otimização.
-
-### 3.3. MLP (Multi-Layer Perceptron / Rede Neural)
-* Rede neural feedforward com 2 camadas ocultas (128 e 64 neurônios), função de ativação ReLU e regularização por decaimento de peso (*weight decay*).
-
-### 3.4. XGBoost e Árvores de Decisão
-* Modelos baseados em árvores com particionamento por ganho de informação (Gini/Entropia) e gradiente boosting.
-
----
-
-## 4. Etapa 3: Validação Cruzada 5-Fold Estratificada e Agrupada
-
-Para evitar qualquer risco de vazamento de dados (*data leakage*):
-1. **Agrupamento Semântico:** Todos os 2.800 registros do corpus V2 possuem um identificador criptográfico de núcleo (`narrative_core_sha256`).
-2. **Isolamento de Grupos:** Nenhuma paráfrase ou variação de um mesmo núcleo pode aparecer simultaneamente no conjunto de treinamento e no conjunto de validação de uma mesma dobra.
-3. **Estratificação por Classe:** Todas as dobras mantêm a mesma proporção equilibrada entre as classes `OBRA`, `DEMO`, `SOB_DEMANDA` e `TRIAGEM_MANUAL`.
-
----
-
-## 5. Etapa 4: Calibração de Probabilidades e Limiares Operacionais
-
-### 5.1. Calibração Pós-Treinamento (Platt Scaling / Isotonic Regression)
-Como as margens do Linear SVM não representam probabilidades calibradas naturalmente, aplicou-se o `CalibratedClassifierCV` com calibração sigmoide em validação cruzada interna de 5 dobras.
-
-### 5.2. Otimização de Limiares com Custos Assimétricos
-Os limiares de corte foram otimizados numericamente sobre as predições Out-of-Fold (OOF):
-* **Classificação Geral:** $\theta = 0,65$ (confiança mínima para automação).
-* **Segurança Reforçada para OBRA:** $\theta_{\text{OBRA}} = 0,90$ (exige evidência contundente para evitar custos indevidos).
-* **Deduplicação Par-a-Par:** Limiar positivo $\theta_{\text{dedup}} = 0,95$ e margem de tolerância $\Delta = 0,035$.
-
----
-
-## 6. Etapa 5: Empacotamento Criptográfico e Runtime de Produção
-
-O modelo campeão foi empacotado no artefato binário [`local_ai/artifacts/local_hybrid_bundle.joblib`](file:///c:/Users/Cayo/Documents/projeto-ic/local_ai/artifacts/local_hybrid_bundle.joblib), contendo:
-* O vetorizador TF-IDF ajustado;
-* O pipeline de transformação de embeddings;
-* O classificador Linear SVM calibrado;
-* O modelo de deduplicação por Regressão Logística;
-* O mapa de limiares calibrados e metadados de treinamento.
-
-A integridade do arquivo é verificada em tempo de execução através do checksum SHA-256 declarado no manifesto [`local_hybrid_manifest.json`](file:///c:/Users/Cayo/Documents/projeto-ic/local_ai/artifacts/local_hybrid_manifest.json), garantindo total imutabilidade e rastreabilidade em ambiente produtivo.
+- bundle v1.8: treinado/calibrado e operacionalmente congelado;
+- E2E V9: validado tecnicamente em um caso sintético isolado;
+- seleção antiga: invalidada;
+- seleção V2.1: classificação parcial validada, sem vencedor qualificado;
+  deduplicação bloqueada por insuficiência de grupos;
+- validação científica institucional: pendente.

@@ -1,5 +1,13 @@
 # Metodologia de avaliação
 
+> [!WARNING]
+> **Snapshot histórico, substituído em 27/08/2026.** Este texto usa unidades
+> de dependência e resultados anteriores à auditoria de famílias-fonte. Não o
+> use como protocolo corrente nem cite suas métricas históricas. A metodologia
+> canônica está em `metodologia_avaliacao_v2_1.md`; a rodada V2.1 classificatória
+> foi validada apenas no escopo parcial e a deduplicação ficou bloqueada por
+> insuficiência de grupos independentes.
+
 ## Pergunta de pesquisa e hipóteses
 
 Pergunta principal: o candidato híbrido local — TF-IDF, Granite Embedding 97M

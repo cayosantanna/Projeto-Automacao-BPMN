@@ -41,6 +41,7 @@ PYTHON_FILES = [
     BASE_DIR / "build_wf06.py",
     BASE_DIR / "ai_gateway_builder.py",
     BASE_DIR / "retry_queue_builder.py",
+    PROJECT_DIR / "local_ai" / "run_server.py",
     PROJECT_DIR / "glpi" / "seed" / "seed_glpi.py",
     PROJECT_DIR / "avaliacao" / "scripts" / "gerar_dataset_avaliacao.py",
     PROJECT_DIR / "avaliacao" / "scripts" / "conferir_gabarito.py",
@@ -382,9 +383,11 @@ def validate_json_structure(workflows: dict[str, dict]) -> None:
             for parameter in iter_strings(node.get("parameters", {})):
                 if "process.env" not in parameter:
                     continue
+                prompt_literal = "{{ Number($env.IA_CONFIANCA_MINIMA || 0.65) }}"
+                without_prompt_literal = parameter.replace(prompt_literal, "")
                 check(
-                    normalize_n8n_env_access(parameter) == parameter,
-                    f"{key}/{node.get('name')} reads $env before process.env",
+                    "$env" not in without_prompt_literal,
+                    f"{key}/{node.get('name')} has no executable $env access",
                 )
 
 
@@ -435,9 +438,13 @@ def validate_v9_rules(workflows: dict[str, dict]) -> None:
             f"{key} has no weak empty GLPI credential header fallback",
         )
         check(
-            "const appToken = String((typeof process !== 'undefined' && "
-            "process.env.GLPI_APP_TOKEN) || '');" not in text,
-            f"{key} Code nodes require GLPI_APP_TOKEN before HTTP",
+            all(
+                "$env" not in str((node.get("parameters") or {}).get("jsCode") or "")
+                and "process.env" not in str((node.get("parameters") or {}).get("jsCode") or "")
+                for node in current_workflow.get("nodes", [])
+                if node.get("type") == "n8n-nodes-base.code"
+            ),
+            f"{key} Code nodes have no environment-variable access",
         )
 
         for node in current_workflow.get("nodes", []):
@@ -471,14 +478,18 @@ def validate_v9_rules(workflows: dict[str, dict]) -> None:
                     f"{key}/{node.get('name')} requires GLPI app and session tokens before direct HTTP",
                 )
 
+    gateway_compose = read_text(PROJECT_DIR / "n8n" / "docker-compose.yml")
+    gateway_template = read_text(PROJECT_DIR / "n8n" / "proxies" / "n8n-gateway.conf.template")
     check(
         "glpi-n8n-ic-2026" not in wf02_text
         and "glpi-n8n-ic-2026" not in workflow_text(wf06)
-        and "expectedKey.length > 0" in wf02_text
-        and "expectedKey !== 'CHANGE_ME'" in wf02_text
-        and "expectedKey.length > 0" in workflow_text(wf06)
-        and "expectedKey !== 'CHANGE_ME'" in workflow_text(wf06),
-        "WF02/WF06 authenticate ingress only with a non-empty GLPI_WEBHOOK_KEY from env",
+        and "n8n-gateway:" in gateway_compose
+        and "GLPI_WEBHOOK_KEY=${GLPI_WEBHOOK_KEY:?" in gateway_compose
+        and "location = /webhook/glpi-ticket-fila-ia-v9" in gateway_template
+        and '$http_x_webhook_key != "${GLPI_WEBHOOK_KEY}"' in gateway_template
+        and "Webhook GLPI" not in wf02_nodes
+        and "wf06-fila-ia" in wf02_text,
+        "gateway authenticates public GLPI ingress; WF02 accepts only internal workflow sources",
     )
 
     check("Webhook GLPI" not in wf02_nodes, "WF02 has no public webhook ingress")
@@ -501,7 +512,11 @@ def validate_v9_rules(workflows: dict[str, dict]) -> None:
         "WF02 routes decision-persistence errors to its fail-closed gate",
     )
     wf02_text = workflow_text(wf02)
-    check("DEDUP_CANDIDATE_LIMIT" in wf02_text, "WF02 uses DEDUP_CANDIDATE_LIMIT")
+    check(
+        "let candidateLimit = 20" in wf02_text
+        and "candidateLimit = Math.min(20" in wf02_text,
+        "WF02 freezes the remote candidate limit at 20",
+    )
     check(
         "DEDUP_LOCAL_TOP_K" in wf02_text
         and "historico_local" in wf02_text
@@ -510,17 +525,20 @@ def validate_v9_rules(workflows: dict[str, dict]) -> None:
     )
     check("LIMIT 80" in wf02_text, "WF02 keeps the 80-row dedup retrieval pool")
     check("fiscal_token_expira_em" in wf02_text, "WF02 writes fiscal_token_expira_em")
-    check("FISCAL_TOKEN_TTL_MINUTOS" in wf02_text, "WF02 uses FISCAL_TOKEN_TTL_MINUTOS")
     check(
-        "DEDUP_POSITIVE_THRESHOLD" in wf02_text
-        and "DEDUP_NEGATIVE_THRESHOLD" in wf02_text
+        "fiscal_token_expira_em" in wf02_text and "ttl=10080" in wf02_text,
+        "WF02 uses the frozen seven-day fiscal token TTL",
+    )
+    check(
+        "0.78" in wf02_text
+        and "0.22" in wf02_text
         and "abstencao_operacional_dedup" in wf02_text,
         "WF02 applies the frozen asymmetric dedup thresholds with operational abstention",
     )
     check("probabilidades" in wf02_text, "WF02 records dedup probabilities for ROC/AUC and Log Loss")
     check("INSERT INTO ia_decisoes" in wf02_text, "WF02 inserts into ia_decisoes")
     check("INSERT INTO workflow_eventos" in wf02_text, "WF02 inserts into workflow_eventos")
-    check("PROMPT_DEDUP_VERSION" in wf02_text, "WF02 records the dedup prompt version")
+    check("deduplicacao_v9.1-episodica" in wf02_text, "WF02 records the frozen dedup prompt version")
     check("Validar Sessão GLPI" in node_names(wf02), "WF02 validates GLPI initSession output")
     check("PG: Enfileirar Webhook" not in node_names(wf02), "WF02 does not own the ingress queue")
     check("PENDENTE_FILA_IA" in wf02_text, "WF02 writes the IA queue status")
@@ -542,9 +560,9 @@ def validate_v9_rules(workflows: dict[str, dict]) -> None:
     check(
         all(marker in wf02_text for marker in (
             "IA_MODEL_SECONDARY", "IA_MODEL_LOCAL", "gemini-3.5-flash",
-            "host.docker.internal:8090",
+            "local-ai-credential-proxy:8080",
         )),
-        "WF02 embeds the remote chain plus the explicit LOCAL provider role",
+        "WF02 embeds the explicit LOCAL role and isolated remote benchmark role",
     )
     check("INSERT INTO ia_tentativas_modelo" in wf02_text, "WF02 persists every provider attempt")
     check(
@@ -672,7 +690,7 @@ def validate_v9_rules(workflows: dict[str, dict]) -> None:
         "WF03 separates semantic IA class from DEMO availability routing",
     )
     check("probabilidades" in wf03_text, "WF03 records class probabilities for ROC/AUC and Log Loss")
-    check("PROMPT_CLASSIF_VERSION" in wf03_text, "WF03 records the classification prompt version")
+    check("classificacao_v9.1-episodica" in wf03_text, "WF03 records the frozen classification prompt version")
     check("Validar Sessão GLPI" in node_names(wf03), "WF03 validates GLPI initSession output")
     check(
         wf03_nodes["IA: Classificar"].get("type") == "n8n-nodes-base.code",
@@ -681,9 +699,9 @@ def validate_v9_rules(workflows: dict[str, dict]) -> None:
     check(
         all(marker in wf03_text for marker in (
             "IA_MODEL_SECONDARY", "IA_MODEL_LOCAL", "gemini-3.5-flash",
-            "host.docker.internal:8090",
+            "local-ai-credential-proxy:8080",
         )),
-        "WF03 embeds the remote chain plus the explicit LOCAL provider role",
+        "WF03 embeds the explicit LOCAL role and isolated remote benchmark role",
     )
     check("INSERT INTO ia_tentativas_modelo" in wf03_text, "WF03 persists every provider attempt")
     check(
@@ -812,10 +830,20 @@ def validate_v9_rules(workflows: dict[str, dict]) -> None:
     check("token_expirado" in wf04_text_lower, "WF04 records expired tokens")
 
     wf05_text = compact(workflow_text(wf05))
-    for table in ANALYTIC_TABLES:
-        check(table in wf05_text, f"WF05 references analytic table {table}")
-    for view in ANALYTIC_STAT_VIEWS:
-        check(view in wf05_text, f"WF05 creates analytic statistic view {view}")
+    for relation in (
+        "ia_decisoes",
+        "ia_tentativas_modelo",
+        "workflow_eventos",
+        "metricas_diarias_automacao",
+        "vw_kpi_geral_automacao",
+        "vw_kpi_duplicidade",
+        "vw_kpi_classificacao",
+    ):
+        check(relation in wf05_text, f"WF05 verifies or reads runtime relation {relation}")
+    check(
+        all(token not in wf05_text for token in ("create table", "alter table", "create or replace view")),
+        "WF05 runtime JSON contains no schema DDL",
+    )
     check("webhook avaliação humana" in wf05_text, "WF05 exposes the human evaluation webhook")
     check("avaliacao-humana-v9" in wf05_text, "WF05 uses the stable human evaluation webhook path")
     check(
@@ -868,8 +896,9 @@ def validate_v9_rules(workflows: dict[str, dict]) -> None:
         "WF06 carries authenticated internal source in the dispatched item",
     )
     check(
-        "typeof $env !== 'undefined' && $env.GLPI_WEBHOOK_KEY" in wf06_text,
-        "WF06 reads the internal webhook key from n8n environment access",
+        "GLPI_WEBHOOK_KEY" not in wf06_text
+        and "O gateway n8n-gateway valida X-Webhook-Key" in wf06_text,
+        "WF06 Code nodes do not receive or read the GLPI webhook secret",
     )
     for worker_name in ("Chamar WF02 da Fila", "Chamar WF03 da Fila"):
         check(
@@ -999,12 +1028,29 @@ def validate_schema_and_config() -> None:
     )
     n8n_env = read_text(env_definition_path)
     for var in REQUIRED_ENV_VARS:
-        check(var in n8n_compose, f"n8n docker-compose.yml exposes {var}")
         check(var in n8n_env, f"{env_definition_path.name} defines {var}")
+    n8n_service_block = n8n_compose.split("\n  n8n:\n", 1)[1].split(
+        "\n  n8n-gateway:\n", 1
+    )[0]
+    check("env_file:" not in n8n_service_block, "n8n main process does not import .env files")
     check(
-        "FILA_IA_RUN_SCOPE=${FILA_IA_RUN_SCOPE:-}" in n8n_compose,
-        "n8n compose exposes an empty-by-default calibration queue scope",
+        all(
+            secret not in n8n_service_block
+            for secret in (
+                "GLPI_APP_TOKEN",
+                "GLPI_AUTH_BASIC",
+                "GLPI_WEBHOOK_KEY",
+                "FISCAL_WEBHOOK_KEY",
+                "IA_LOCAL_API_TOKEN",
+                "TEST_AUTO_REVIEW_TOKEN",
+                "GEMINI_API_KEY",
+            )
+        ),
+        "integration secrets are absent from the n8n main process",
     )
+    check("N8N_BLOCK_ENV_ACCESS_IN_NODE" in n8n_service_block, "n8n blocks node environment access")
+    check("N8N_RUNNERS_MODE=${N8N_RUNNERS_MODE:-external}" in n8n_service_block, "n8n uses external task runners")
+    check("FILA_IA_RUN_SCOPE" in n8n_env, "environment template defines calibration queue scope")
     check(":latest" not in n8n_compose, "n8n compose has no mutable latest images")
     check("healthcheck:" in n8n_compose, "PostgreSQL compose has a healthcheck")
     check("condition: service_healthy" in n8n_compose, "n8n waits for healthy PostgreSQL")
@@ -1058,7 +1104,7 @@ def validate_schema_and_config() -> None:
         ),
         f"{env_definition_path.name} contains no remote AI credential value",
     )
-    check(".env.local" in n8n_compose, "n8n docker-compose.yml loads .env.local")
+    check(".env.local" not in n8n_service_block, "n8n main process does not load .env.local")
     if env_local.exists():
         local_values = parse_env_values(read_text(env_local))
         invalid_secrets = invalid_configured_remote_secrets(local_values)
@@ -1088,6 +1134,12 @@ def validate_schema_and_config() -> None:
         "public builders, workflows and scripts contain no predictable credential fallback"
         + (f" (files: {', '.join(credential_hits)})" if credential_hits else ""),
     )
+    local_ai_runner = read_text(PROJECT_DIR / "local_ai" / "run_server.py")
+    check(
+        'os.environ["LOCAL_AI_API_TOKEN"] =' not in local_ai_runner
+        and "LOCAL_AI_API_TOKEN" in local_ai_runner,
+        "local_ai direct runner requires an external token and embeds no token value",
+    )
 
     model_config_path = PROJECT_DIR / "avaliacao" / "config" / "modelos_ia_v1.json"
     check(model_config_path.exists(), "multi-model policy manifest exists")
@@ -1101,8 +1153,10 @@ def validate_schema_and_config() -> None:
         )
         check(
             model_config.get("operational_policy", {}).get("sequence")
-            == ["LOCAL", "SECONDARY"],
-            "multi-model policy freezes the local-first operational failover order",
+            == ["LOCAL"]
+            and model_config.get("operational_policy", {}).get("failover_enabled") is False
+            and models.get("SECONDARY", {}).get("active_operational_role") is False,
+            "multi-model policy freezes the LOCAL-only operational order",
         )
         check(
             models.get("LOCAL", {}).get("provider") == "local-native"
@@ -1185,11 +1239,10 @@ def validate_schema_and_config() -> None:
                 f"{workflow_key} gateway contains official provider endpoint",
             )
             check(
-                all(name in gateway_js for name in (
-                    "GEMINI_API_KEY_SECONDARY",
-                    "IA_LOCAL_API_TOKEN"
-                )),
-                f"{workflow_key} reads all provider credentials only from environment",
+                "$env" not in gateway_js
+                and "process.env" not in gateway_js
+                and "local-ai-credential-proxy:8080" in gateway_js,
+                f"{workflow_key} keeps secrets outside Code and uses the credential proxy",
             )
             check(
                 "const roles = ['LOCAL','SECONDARY'];" in gateway_js,
@@ -1212,13 +1265,14 @@ def validate_schema_and_config() -> None:
             )
             check(
                 "IA_OPERATIONAL_SEQUENCE" in gateway_js
+                and "IA_OPERATIONAL_SEQUENCE:'LOCAL'" in gateway_js
                 and "operational_sequence:operationalChain(fixedRole)" in gateway_js,
-                f"{workflow_key} uses an environment-configurable audited operational sequence",
+                f"{workflow_key} uses a frozen and audited LOCAL-only operational sequence",
             )
             check(
-                "if (role === 'LOCAL') return [...roles];" in gateway_js
+                "if (role === 'LOCAL') return ['LOCAL'];" in gateway_js
                 and "['LOCAL',...roles]" not in gateway_js,
-                f"{workflow_key} fallback chain does not repeat the LOCAL provider",
+                f"{workflow_key} operational chain does not add a remote fallback",
             )
             check(
                 "attempt_input_profiles" in gateway_js

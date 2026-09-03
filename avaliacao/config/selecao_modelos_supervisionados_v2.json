@@ -1,16 +1,16 @@
 {
   "schema": "projeto-ic-selecao-modelos-supervisionados-v1",
-  "protocol_version": "2.0.0",
-  "created_at": "2026-08-18",
+  "protocol_version": "2.1.0",
+  "created_at": "2026-08-26",
   "development_only": true,
   "scientific_result": false,
   "confirmatory_eligible": false,
   "dataset": {
     "path": "avaliacao/datasets/desenvolvimento_local_v2.jsonl",
-    "sha256": "620a2004ace1b2fb86673d753e967083539775d82ad417046ea1dd8510b80219",
+    "sha256": "305e84164d663a19a2e224b2dc8bf08e8d3173bf50bc15c7675f9de553d2de9a",
     "allowed_split": "DESENVOLVIMENTO",
-    "classification_group_field": "narrative_core_sha256",
-    "deduplication_group_field": "episode_id",
+    "classification_group_field": "source_dependency_group_sha256",
+    "deduplication_group_field": "source_dependency_group_sha256",
     "forbidden_paths": [
       "avaliacao/datasets/corpus_v3_teste.jsonl",
       "avaliacao/datasets/dataset_avaliacao_v2.jsonl",

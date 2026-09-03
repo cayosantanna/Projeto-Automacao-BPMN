@@ -1,5 +1,13 @@
 # Resultado consolidado — estado em 17/08/2026
 
+> [!WARNING]
+> **Snapshot histórico, superado pela auditoria de 26/08/2026.** A seleção
+> citada neste documento não sustenta ranking atual: derivados de poucas
+> famílias-fonte não ficaram integralmente no mesmo grupo. Toda classificação
+> permanece sintética e a deduplicação antiga é subdimensionada. Use
+> `auditoria_critica_completa_2026-08-26.md` e
+> `resposta_professor_2026-08-26.md` como estado canônico.
+
 A versão anterior deste arquivo apresentava números da v1.1 como resultado
 final. Essa interpretação foi invalidada porque a v1.1 falhou em 1.045 das
 1.240 unidades e sua acurácia seletiva considerava apenas sobreviventes.

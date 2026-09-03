@@ -179,11 +179,20 @@ class V9ContractTests(unittest.TestCase):
         for fragment in (
             "pg_advisory_xact_lock(9062026)",
             "FOR UPDATE SKIP LOCKED",
-            "GREATEST(${lote} - COUNT(*)::int,0)",
+            "GREATEST((SELECT tamanho FROM lote_efetivo) - COUNT(*)::int,0)",
+            "fila_elegivel AS MATERIALIZED",
+            "e.status IN ('EXECUTANDO','CALIBRANDO')",
+            "triagem_status='EXPERIMENTO_ENCERRADO'",
+            "WF06_QUARENTENA_EXPERIMENTO_ENCERRADO",
             "fila_reservada_em=NOW()",
             "Reserva expirada; reenfileirado pelo WF06",
         ):
             self.assertIn(fragment, sql)
+        self.assertGreaterEqual(
+            sql.count("JOIN fila_elegivel e ON e.id=t.id"),
+            5,
+            "capacidade, reserva e métricas devem usar o mesmo escopo elegível",
+        )
 
     def test_helpers_runtime_usam_metodos_e_endpoints_corretos(self) -> None:
         config = runtime.RuntimeConfig("http://127.0.0.1:5678", 7)

@@ -1,7 +1,8 @@
 """Gera V9-WF05-Metricas.json.
 
 WF05 e um workflow independente de avaliacao. Ele nao participa da triagem
-operacional; apenas garante o schema analitico e consolida metricas para BI.
+operacional; verifica o schema provisionado pela migracao administrada e
+consolida metricas para BI. O login runtime nao executa DDL.
 """
 from __future__ import annotations
 
@@ -14,601 +15,28 @@ from helpers import sanitize_workflow_secrets
 
 DIR = Path(__file__).resolve().parent
 OUTPUT_FILES = ["V9-WF05-Metricas.json"]
-SNAPSHOT_SHA256 = "4e4715c33cdde9478e4e47b6a9c7f2d0375a4586e89ca20e7cb3958f7db73ac0"
+SNAPSHOT_SHA256 = "7ba4d7f8cabf7ae05d8b3e3bb06de2f19eda504c6ce6b852cf05fd3a852841ae"
 
 PG_CRED = {"postgres": {"id": "PG_TRIAGEM", "name": "Postgres Triagem"}}
 SMTP_CRED = {"smtp": {"id": "SMTP_MAILPIT_LOCAL", "name": "SMTP Mailpit Local"}}
 
-
-OBSERVABILITY_SCHEMA_SQL = r"""
-CREATE TABLE IF NOT EXISTS ia_decisoes (
-  id                  BIGSERIAL PRIMARY KEY,
-  ticket_id           BIGINT,
-  workflow_origem     TEXT NOT NULL,
-  etapa               TEXT NOT NULL,
-  modelo_ia           TEXT DEFAULT 'Gemini',
-  versao_modelo       TEXT,
-  prompt_version      TEXT,
-  input_hash          TEXT,
-  input_resumo        JSONB,
-  output_raw          JSONB,
-  output_normalizado  JSONB,
-  predicao            TEXT,
-  classe_referencia_id BIGINT,
-  confianca           NUMERIC(5,4),
-  justificativa       TEXT,
-  tempo_resposta_ms   INTEGER,
-  tentativa_numero    INTEGER,
-  erro_ia             BOOLEAN DEFAULT FALSE,
-  mensagem_erro       TEXT,
-  criado_em           TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_ia_decisoes_ticket ON ia_decisoes(ticket_id);
-CREATE INDEX IF NOT EXISTS idx_ia_decisoes_etapa ON ia_decisoes(etapa);
-CREATE INDEX IF NOT EXISTS idx_ia_decisoes_prompt ON ia_decisoes(prompt_version);
-CREATE INDEX IF NOT EXISTS idx_ia_decisoes_modelo ON ia_decisoes(modelo_ia, versao_modelo);
-CREATE INDEX IF NOT EXISTS idx_ia_decisoes_criado ON ia_decisoes(criado_em);
-CREATE INDEX IF NOT EXISTS idx_ia_decisoes_predicao ON ia_decisoes(predicao);
-
-CREATE TABLE IF NOT EXISTS ia_tentativas_modelo (
-  id                  BIGSERIAL PRIMARY KEY,
-  ia_decisao_id       BIGINT REFERENCES ia_decisoes(id) ON DELETE CASCADE,
-  ticket_id           BIGINT,
-  run_id              TEXT,
-  case_id             TEXT,
-  episode_id          TEXT,
-  workflow_origem     TEXT NOT NULL,
-  etapa               TEXT NOT NULL,
-  ciclo_tentativa     TEXT NOT NULL,
-  ordem_tentativa     INTEGER NOT NULL CHECK (ordem_tentativa > 0),
-  papel_modelo        TEXT NOT NULL,
-  provedor_ia         TEXT NOT NULL,
-  versao_modelo       TEXT NOT NULL,
-  perfil_pensamento   TEXT,
-  fallback_utilizado  BOOLEAN NOT NULL DEFAULT FALSE,
-  iniciado_em         TIMESTAMPTZ,
-  finalizado_em       TIMESTAMPTZ,
-  duracao_ms          INTEGER,
-  transporte_ok       BOOLEAN,
-  schema_ok           BOOLEAN,
-  status_tentativa    TEXT NOT NULL,
-  codigo_erro         TEXT,
-  mensagem_erro       TEXT,
-  resposta_raw        JSONB,
-  endpoint             TEXT,
-  perfil_entrada       TEXT,
-  prompt_chars         INTEGER,
-  input_chars          INTEGER,
-  total_candidatos     INTEGER,
-  http_status          INTEGER,
-  retry_after_seconds  INTEGER,
-  retryable            BOOLEAN,
-  tipo_erro            TEXT,
-  metadata_cientifica  JSONB,
-  input_tokens        INTEGER,
-  output_tokens       INTEGER,
-  total_tokens        INTEGER,
-  politica_execucao   JSONB NOT NULL DEFAULT '{}'::jsonb,
-  criado_em           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE(ciclo_tentativa, ordem_tentativa)
-);
-
-ALTER TABLE ia_tentativas_modelo ADD COLUMN IF NOT EXISTS endpoint TEXT;
-ALTER TABLE ia_tentativas_modelo ADD COLUMN IF NOT EXISTS perfil_entrada TEXT;
-ALTER TABLE ia_tentativas_modelo ADD COLUMN IF NOT EXISTS prompt_chars INTEGER;
-ALTER TABLE ia_tentativas_modelo ADD COLUMN IF NOT EXISTS input_chars INTEGER;
-ALTER TABLE ia_tentativas_modelo ADD COLUMN IF NOT EXISTS total_candidatos INTEGER;
-ALTER TABLE ia_tentativas_modelo ADD COLUMN IF NOT EXISTS http_status INTEGER;
-ALTER TABLE ia_tentativas_modelo ADD COLUMN IF NOT EXISTS retry_after_seconds INTEGER;
-ALTER TABLE ia_tentativas_modelo ADD COLUMN IF NOT EXISTS retryable BOOLEAN;
-ALTER TABLE ia_tentativas_modelo ADD COLUMN IF NOT EXISTS tipo_erro TEXT;
-ALTER TABLE ia_tentativas_modelo ADD COLUMN IF NOT EXISTS metadata_cientifica JSONB;
-
-CREATE INDEX IF NOT EXISTS idx_ia_tentativas_decisao
-  ON ia_tentativas_modelo(ia_decisao_id, ordem_tentativa);
-CREATE INDEX IF NOT EXISTS idx_ia_tentativas_run
-  ON ia_tentativas_modelo(run_id, etapa, criado_em DESC)
-  WHERE run_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_ia_tentativas_modelo
-  ON ia_tentativas_modelo(provedor_ia, versao_modelo, status_tentativa, criado_em DESC);
-
-CREATE TABLE IF NOT EXISTS avaliacoes_humanas (
-  id                 BIGSERIAL PRIMARY KEY,
-  ticket_id          BIGINT,
-  etapa              TEXT NOT NULL,
-  avaliador          TEXT,
-  decisao_ia         TEXT,
-  decisao_humana     TEXT,
-  classe_correta     TEXT,
-  ia_estava_correta  BOOLEAN,
-  tipo_erro          TEXT,
-  gravidade_erro     TEXT,
-  motivo_divergencia TEXT,
-  observacao         TEXT,
-  avaliacao_token    TEXT,
-  avaliacao_token_expira_em TIMESTAMPTZ,
-  status_avaliacao   TEXT DEFAULT 'CONCLUIDA',
-  origem_amostra     TEXT,
-  solicitado_em      TIMESTAMPTZ,
-  concluido_em       TIMESTAMPTZ,
-  avaliado_em        TIMESTAMPTZ DEFAULT NOW()
-);
-
-ALTER TABLE avaliacoes_humanas ADD COLUMN IF NOT EXISTS avaliacao_token TEXT;
-ALTER TABLE avaliacoes_humanas ADD COLUMN IF NOT EXISTS avaliacao_token_expira_em TIMESTAMPTZ;
-ALTER TABLE avaliacoes_humanas ADD COLUMN IF NOT EXISTS status_avaliacao TEXT DEFAULT 'CONCLUIDA';
-ALTER TABLE avaliacoes_humanas ADD COLUMN IF NOT EXISTS origem_amostra TEXT;
-ALTER TABLE avaliacoes_humanas ADD COLUMN IF NOT EXISTS solicitado_em TIMESTAMPTZ;
-ALTER TABLE avaliacoes_humanas ADD COLUMN IF NOT EXISTS concluido_em TIMESTAMPTZ;
-
-CREATE INDEX IF NOT EXISTS idx_avaliacoes_ticket ON avaliacoes_humanas(ticket_id);
-CREATE INDEX IF NOT EXISTS idx_avaliacoes_etapa ON avaliacoes_humanas(etapa);
-CREATE INDEX IF NOT EXISTS idx_avaliacoes_correta ON avaliacoes_humanas(ia_estava_correta);
-CREATE INDEX IF NOT EXISTS idx_avaliacoes_tipo_erro ON avaliacoes_humanas(tipo_erro);
-CREATE INDEX IF NOT EXISTS idx_avaliacoes_data ON avaliacoes_humanas(avaliado_em);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_avaliacoes_token ON avaliacoes_humanas(avaliacao_token) WHERE avaliacao_token IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_avaliacoes_pendente ON avaliacoes_humanas(ticket_id, etapa) WHERE status_avaliacao = 'PENDENTE';
-CREATE INDEX IF NOT EXISTS idx_avaliacoes_status ON avaliacoes_humanas(status_avaliacao);
-
-CREATE TABLE IF NOT EXISTS workflow_eventos (
-  id              BIGSERIAL PRIMARY KEY,
-  ticket_id       BIGINT,
-  workflow        TEXT NOT NULL,
-  node_name       TEXT,
-  fase            TEXT,
-  acao            TEXT,
-  status_evento   TEXT,
-  status_anterior TEXT,
-  status_novo     TEXT,
-  erro            BOOLEAN DEFAULT FALSE,
-  mensagem_erro   TEXT,
-  execution_id    TEXT,
-  inicio_em       TIMESTAMPTZ,
-  fim_em          TIMESTAMPTZ,
-  duracao_ms      INTEGER,
-  criado_em       TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_workflow_eventos_ticket ON workflow_eventos(ticket_id);
-CREATE INDEX IF NOT EXISTS idx_workflow_eventos_workflow ON workflow_eventos(workflow);
-CREATE INDEX IF NOT EXISTS idx_workflow_eventos_fase ON workflow_eventos(fase);
-CREATE INDEX IF NOT EXISTS idx_workflow_eventos_criado ON workflow_eventos(criado_em);
-CREATE INDEX IF NOT EXISTS idx_workflow_eventos_erro ON workflow_eventos(erro);
-
-CREATE TABLE IF NOT EXISTS dataset_controle (
-  id                              BIGSERIAL PRIMARY KEY,
-  ticket_id                       BIGINT,
-  origem                          TEXT NOT NULL DEFAULT 'SEED_CONTROLADO',
-  cenario_controle                TEXT,
-  duplicado_esperado              BOOLEAN,
-  referencia_duplicado_esperada   BIGINT,
-  classificacao_esperada          TEXT,
-  executor_esperado               TEXT,
-  status_final_esperado           TEXT,
-  nivel_dificuldade               TEXT,
-  observacao                      TEXT,
-  criado_em                       TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_dataset_ticket ON dataset_controle(ticket_id);
-CREATE INDEX IF NOT EXISTS idx_dataset_cenario ON dataset_controle(cenario_controle);
-CREATE INDEX IF NOT EXISTS idx_dataset_origem ON dataset_controle(origem);
-
-CREATE OR REPLACE VIEW vw_dataset_controle_resultados AS
+SCHEMA_READINESS_SQL = r"""
 SELECT
-  d.id AS dataset_id,
-  d.ticket_id,
-  d.origem,
-  d.cenario_controle,
-  d.duplicado_esperado,
-  d.referencia_duplicado_esperada,
-  d.classificacao_esperada,
-  d.executor_esperado,
-  d.status_final_esperado,
-  d.nivel_dificuldade,
-  t.classificacao_final AS classificacao_obtida,
-  t.executor AS executor_obtido,
-  t.status_nome AS status_final_obtido,
-  t.duplicado_de_id AS referencia_duplicado_obtida,
-  CASE
-    WHEN d.duplicado_esperado IS NULL THEN NULL
-    WHEN d.duplicado_esperado = TRUE THEN COALESCE(t.duplicado_de_id IS NOT NULL OR t.classificacao_final='DUPLICADO', FALSE)
-    ELSE COALESCE(t.duplicado_de_id IS NULL AND COALESCE(t.classificacao_final,'') <> 'DUPLICADO', FALSE)
-  END AS duplicidade_ok,
-  CASE
-    WHEN d.classificacao_esperada IS NULL THEN NULL
-    ELSE COALESCE(t.classificacao_final = d.classificacao_esperada, FALSE)
-  END AS classificacao_ok,
-  CASE
-    WHEN d.executor_esperado IS NULL THEN NULL
-    ELSE COALESCE(t.executor = d.executor_esperado, FALSE)
-  END AS executor_ok,
-  CASE
-    WHEN d.status_final_esperado IS NULL THEN NULL
-    ELSE COALESCE(t.status_nome = d.status_final_esperado, FALSE)
-  END AS status_final_ok,
-  t.ultima_acao_workflow,
-  t.atualizado_em
-FROM dataset_controle d
-LEFT JOIN tickets_processados t ON t.id = d.ticket_id;
-
-CREATE TABLE IF NOT EXISTS metricas_diarias_automacao (
-  data_ref                         DATE PRIMARY KEY,
-  total_chamados_processados       INTEGER DEFAULT 0,
-  total_classificados_automaticamente INTEGER DEFAULT 0,
-  total_enviados_triagem_manual    INTEGER DEFAULT 0,
-  total_com_erro_ia                INTEGER DEFAULT 0,
-  total_aguardando_fiscal          INTEGER DEFAULT 0,
-  tempo_medio_triagem_min          NUMERIC(12,2),
-  taxa_intervencao_humana          NUMERIC(8,4),
-  taxa_automacao_efetiva           NUMERIC(8,4),
-  taxa_erro_ia                     NUMERIC(8,4),
-  taxa_triagem_manual              NUMERIC(8,4),
-  chamados_travados_24h            INTEGER DEFAULT 0,
-  atualizado_em                    TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS metricas_prompt_version (
-  data_ref              DATE NOT NULL,
-  etapa                 TEXT NOT NULL,
-  prompt_version        TEXT NOT NULL,
-  modelo_ia             TEXT,
-  versao_modelo         TEXT,
-  total_decisoes        INTEGER DEFAULT 0,
-  total_erros_ia        INTEGER DEFAULT 0,
-  confianca_media       NUMERIC(8,4),
-  tempo_medio_ia_ms     NUMERIC(14,2),
-  acuracia_avaliada     NUMERIC(8,4),
-  atualizado_em         TIMESTAMPTZ DEFAULT NOW(),
-  PRIMARY KEY(data_ref, etapa, prompt_version, modelo_ia, versao_modelo)
-);
-
-CREATE TABLE IF NOT EXISTS metricas_workflow_performance (
-  data_ref          DATE NOT NULL,
-  workflow          TEXT NOT NULL,
-  fase              TEXT NOT NULL DEFAULT '',
-  total_eventos     INTEGER DEFAULT 0,
-  total_erros       INTEGER DEFAULT 0,
-  duracao_media_ms  NUMERIC(14,2),
-  duracao_p95_ms    NUMERIC(14,2),
-  atualizado_em     TIMESTAMPTZ DEFAULT NOW(),
-  PRIMARY KEY(data_ref, workflow, fase)
-);
-
-CREATE TABLE IF NOT EXISTS resumos_executivos_ia (
-  id             BIGSERIAL PRIMARY KEY,
-  periodo_inicio DATE NOT NULL,
-  periodo_fim    DATE NOT NULL,
-  tipo_resumo    TEXT NOT NULL,
-  prompt_version TEXT,
-  modelo_ia      TEXT,
-  resumo         TEXT NOT NULL,
-  dados_base     JSONB,
-  criado_em      TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE OR REPLACE VIEW vw_kpi_geral_automacao AS
-SELECT
-  COUNT(*)::int AS total_chamados_processados,
-  COUNT(*) FILTER (WHERE classificacao_final IN ('OBRA','DEMO','SOB_DEMANDA','DUPLICADO'))::int AS total_classificados_automaticamente,
-  COUNT(*) FILTER (WHERE classificacao_final = 'TRIAGEM_MANUAL' OR triagem_manual = TRUE)::int AS total_enviados_para_triagem_manual,
-  COUNT(*) FILTER (WHERE triagem_status = 'ERRO_IA' OR ultimo_erro_ia IS NOT NULL)::int AS total_com_erro_ia,
-  ROUND(AVG(EXTRACT(EPOCH FROM (triado_em - data_abertura)) / 60.0) FILTER (WHERE triado_em IS NOT NULL AND data_abertura IS NOT NULL AND triado_em >= data_abertura), 2) AS tempo_medio_triagem,
-  ROUND(100.0 * COUNT(*) FILTER (WHERE triagem_manual = TRUE OR em_aprovacao_fiscal = TRUE OR decisao_fiscal IS NOT NULL) / NULLIF(COUNT(*), 0), 2) AS taxa_intervencao_humana,
-  ROUND(100.0 * COUNT(*) FILTER (WHERE classificacao_final IN ('OBRA','DEMO','SOB_DEMANDA','DUPLICADO')) / NULLIF(COUNT(*), 0), 2) AS taxa_automacao_efetiva
-FROM tickets_processados;
-
-CREATE OR REPLACE VIEW vw_kpi_duplicidade AS
-SELECT
-  COUNT(*) FILTER (WHERE classificacao = 'POSSIVEL_DUPLICADO' OR classificacao_final IN ('POSSIVEL_DUPLICADO','DUPLICADO') OR decisao_fiscal IN ('CONFIRMOU_DUP','REJEITOU_DUP'))::int AS possiveis_duplicados_detectados,
-  COUNT(*) FILTER (WHERE decisao_fiscal = 'CONFIRMOU_DUP')::int AS duplicidades_confirmadas,
-  COUNT(*) FILTER (WHERE decisao_fiscal = 'REJEITOU_DUP')::int AS duplicidades_rejeitadas,
-  COUNT(*) FILTER (WHERE em_aprovacao_fiscal = TRUE)::int AS duplicidades_pendentes,
-  ROUND(100.0 * COUNT(*) FILTER (WHERE decisao_fiscal = 'CONFIRMOU_DUP') / NULLIF(COUNT(*) FILTER (WHERE decisao_fiscal IN ('CONFIRMOU_DUP','REJEITOU_DUP')), 0), 2) AS precisao_duplicidade,
-  ROUND(100.0 * COUNT(*) FILTER (WHERE decisao_fiscal = 'REJEITOU_DUP') / NULLIF(COUNT(*) FILTER (WHERE decisao_fiscal IN ('CONFIRMOU_DUP','REJEITOU_DUP')), 0), 2) AS taxa_falso_positivo_duplicidade,
-  ROUND(AVG(EXTRACT(EPOCH FROM (aprovacao_decidida_em - aprovacao_iniciada_em)) / 60.0) FILTER (WHERE aprovacao_decidida_em IS NOT NULL AND aprovacao_iniciada_em IS NOT NULL), 2) AS tempo_medio_decisao_fiscal_min
-FROM tickets_processados;
-
-CREATE OR REPLACE VIEW vw_matriz_confusao_classificacao AS
-WITH base AS (
-  SELECT
-    COALESCE(classe_correta, decisao_humana) AS classe_correta,
-    decisao_ia AS classe_predita_pela_ia
-  FROM avaliacoes_humanas
-  WHERE etapa = 'CLASSIFICACAO'
-    AND COALESCE(classe_correta, decisao_humana) IS NOT NULL
-    AND decisao_ia IS NOT NULL
-)
-SELECT
-  classe_correta,
-  classe_predita_pela_ia,
-  COUNT(*)::int AS quantidade,
-  ROUND(100.0 * COUNT(*) / NULLIF(SUM(COUNT(*)) OVER (PARTITION BY classe_correta), 0), 2) AS percentual
-FROM base
-GROUP BY classe_correta, classe_predita_pela_ia;
-
-CREATE OR REPLACE VIEW vw_kpi_classificacao AS
-WITH classes(classe) AS (VALUES ('OBRA'), ('DEMO'), ('SOB_DEMANDA'), ('DEMO_SEM_EQUIPE'), ('TRIAGEM_MANUAL')),
-aval AS (
-  SELECT decisao_ia, COALESCE(classe_correta, decisao_humana) AS classe_correta, ia_estava_correta
-  FROM avaliacoes_humanas
-  WHERE etapa = 'CLASSIFICACAO'
-),
-metricas AS (
-  SELECT
-    c.classe,
-    COUNT(*) FILTER (WHERE a.decisao_ia = c.classe AND a.classe_correta = c.classe)::numeric AS tp,
-    COUNT(*) FILTER (WHERE a.decisao_ia = c.classe AND a.classe_correta <> c.classe)::numeric AS fp,
-    COUNT(*) FILTER (WHERE a.decisao_ia <> c.classe AND a.classe_correta = c.classe)::numeric AS fn
-  FROM classes c CROSS JOIN aval a
-  GROUP BY c.classe
-),
-por_classe AS (
-  SELECT
-    classe,
-    tp / NULLIF(tp + fp, 0) AS precisao,
-    tp / NULLIF(tp + fn, 0) AS recall,
-    (2 * (tp / NULLIF(tp + fp, 0)) * (tp / NULLIF(tp + fn, 0))) / NULLIF((tp / NULLIF(tp + fp, 0)) + (tp / NULLIF(tp + fn, 0)), 0) AS f1
-  FROM metricas
-)
-SELECT
-  ROUND(AVG((ia_estava_correta::int)::numeric) FILTER (WHERE ia_estava_correta IS NOT NULL), 4) AS acuracia_geral,
-  ROUND(MAX(precisao) FILTER (WHERE classe='OBRA'), 4) AS precisao_obra,
-  ROUND(MAX(recall) FILTER (WHERE classe='OBRA'), 4) AS recall_obra,
-  ROUND(MAX(f1) FILTER (WHERE classe='OBRA'), 4) AS f1_obra,
-  ROUND(MAX(precisao) FILTER (WHERE classe='DEMO'), 4) AS precisao_demo,
-  ROUND(MAX(recall) FILTER (WHERE classe='DEMO'), 4) AS recall_demo,
-  ROUND(MAX(f1) FILTER (WHERE classe='DEMO'), 4) AS f1_demo,
-  ROUND(MAX(precisao) FILTER (WHERE classe='SOB_DEMANDA'), 4) AS precisao_sob_demanda,
-  ROUND(MAX(recall) FILTER (WHERE classe='SOB_DEMANDA'), 4) AS recall_sob_demanda,
-  ROUND(MAX(f1) FILTER (WHERE classe='SOB_DEMANDA'), 4) AS f1_sob_demanda,
-  ROUND(MAX(precisao) FILTER (WHERE classe='DEMO_SEM_EQUIPE'), 4) AS precisao_demo_sem_equipe,
-  ROUND(MAX(recall) FILTER (WHERE classe='DEMO_SEM_EQUIPE'), 4) AS recall_demo_sem_equipe,
-  ROUND(MAX(f1) FILTER (WHERE classe='DEMO_SEM_EQUIPE'), 4) AS f1_demo_sem_equipe,
-  ROUND(MAX(precisao) FILTER (WHERE classe='TRIAGEM_MANUAL'), 4) AS precisao_triagem_manual,
-  ROUND(MAX(recall) FILTER (WHERE classe='TRIAGEM_MANUAL'), 4) AS recall_triagem_manual,
-  ROUND(MAX(f1) FILTER (WHERE classe='TRIAGEM_MANUAL'), 4) AS f1_triagem_manual,
-  ROUND(AVG(f1), 4) AS f1_macro,
-  (SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE classificacao_final='TRIAGEM_MANUAL') / NULLIF(COUNT(*), 0), 2) FROM tickets_processados) AS taxa_triagem_manual,
-  (SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE triagem_status='ERRO_IA' OR ultimo_erro_ia IS NOT NULL) / NULLIF(COUNT(*), 0), 2) FROM tickets_processados) AS taxa_erro_ia
-FROM por_classe, aval;
-
-CREATE OR REPLACE VIEW vw_scores_classificacao AS
-WITH classes(classe) AS (VALUES ('OBRA'), ('DEMO'), ('SOB_DEMANDA'), ('DEMO_SEM_EQUIPE'), ('TRIAGEM_MANUAL')),
-aval AS (
-  SELECT
-    a.ticket_id,
-    COALESCE(NULLIF(a.classe_correta, ''), NULLIF(a.decisao_humana, '')) AS classe_correta,
-    NULLIF(a.decisao_ia, '') AS classe_predita,
-    a.ia_estava_correta,
-    a.avaliado_em
-  FROM avaliacoes_humanas a
-  WHERE a.etapa = 'CLASSIFICACAO'
-    AND COALESCE(a.status_avaliacao, 'CONCLUIDA') = 'CONCLUIDA'
-    AND COALESCE(NULLIF(a.classe_correta, ''), NULLIF(a.decisao_humana, '')) IS NOT NULL
-    AND NULLIF(a.decisao_ia, '') IS NOT NULL
-),
-base AS (
-  SELECT
-    a.ticket_id,
-    c.classe,
-    a.classe_correta,
-    COALESCE(d.predicao, a.classe_predita) AS classe_predita,
-    (a.classe_correta = c.classe) AS classe_positiva,
-    COALESCE(d.confianca, CASE WHEN a.ia_estava_correta THEN 1 ELSE 0 END::numeric) AS confianca_decisao,
-    CASE
-      WHEN d.output_normalizado IS NOT NULL
-       AND jsonb_typeof(d.output_normalizado->'probabilidades') = 'object'
-       AND (d.output_normalizado->'probabilidades'->>c.classe) ~ '^[0-9]+(\.[0-9]+)?$'
-      THEN (d.output_normalizado->'probabilidades'->>c.classe)::numeric
-      WHEN COALESCE(d.predicao, a.classe_predita) = c.classe THEN COALESCE(d.confianca, CASE WHEN a.ia_estava_correta THEN 1 ELSE 0 END::numeric)
-      ELSE GREATEST(0, (1 - COALESCE(d.confianca, CASE WHEN a.ia_estava_correta THEN 1 ELSE 0 END::numeric)) / 4.0)
-    END AS score_classe,
-    d.prompt_version,
-    d.modelo_ia,
-    d.versao_modelo,
-    a.avaliado_em
-  FROM aval a
-  CROSS JOIN classes c
-  LEFT JOIN LATERAL (
-    SELECT predicao, confianca, output_normalizado, prompt_version, modelo_ia, versao_modelo
-    FROM ia_decisoes d
-    WHERE d.ticket_id = a.ticket_id
-      AND d.etapa = 'CLASSIFICACAO'
-      AND d.erro_ia = FALSE
-    ORDER BY d.criado_em DESC, d.id DESC
-    LIMIT 1
-  ) d ON TRUE
-)
-SELECT
-  ticket_id,
-  classe,
-  classe_correta,
-  classe_predita,
-  classe_positiva,
-  LEAST(0.999999, GREATEST(0.000001, COALESCE(score_classe, 0.000001))) AS score_classe,
-  confianca_decisao,
-  prompt_version,
-  modelo_ia,
-  versao_modelo,
-  avaliado_em
-FROM base;
-
-CREATE OR REPLACE VIEW vw_metricas_assertividade_classificacao AS
-WITH metricas AS (
-  SELECT
-    classe,
-    COUNT(*)::numeric AS total,
-    COUNT(*) FILTER (WHERE classe_positiva = TRUE AND classe_predita = classe)::numeric AS tp,
-    COUNT(*) FILTER (WHERE classe_positiva = FALSE AND classe_predita = classe)::numeric AS fp,
-    COUNT(*) FILTER (WHERE classe_positiva = TRUE AND classe_predita <> classe)::numeric AS fn,
-    COUNT(*) FILTER (WHERE classe_positiva = FALSE AND classe_predita <> classe)::numeric AS tn
-  FROM vw_scores_classificacao
-  GROUP BY classe
-)
-SELECT
-  classe,
-  total::int,
-  tp::int,
-  fp::int,
-  fn::int,
-  tn::int,
-  ROUND((tp + tn) / NULLIF(total, 0), 4) AS acuracia,
-  ROUND(tp / NULLIF(tp + fp, 0), 4) AS precisao,
-  ROUND(tp / NULLIF(tp + fn, 0), 4) AS recall_sensitivity,
-  ROUND(tn / NULLIF(tn + fp, 0), 4) AS especificidade,
-  ROUND((2 * tp) / NULLIF((2 * tp) + fp + fn, 0), 4) AS f1_score
-FROM metricas;
-
-CREATE OR REPLACE VIEW vw_roc_classificacao AS
-WITH thresholds AS (
-  SELECT classe, score_classe AS threshold FROM vw_scores_classificacao
-  UNION
-  SELECT DISTINCT classe, 0::numeric AS threshold FROM vw_scores_classificacao
-  UNION
-  SELECT DISTINCT classe, 1::numeric AS threshold FROM vw_scores_classificacao
-)
-SELECT
-  t.classe,
-  t.threshold,
-  ROUND(COUNT(*) FILTER (WHERE s.classe_positiva = TRUE AND s.score_classe >= t.threshold)::numeric / NULLIF(COUNT(*) FILTER (WHERE s.classe_positiva = TRUE), 0), 6) AS recall_tpr,
-  ROUND(COUNT(*) FILTER (WHERE s.classe_positiva = FALSE AND s.score_classe >= t.threshold)::numeric / NULLIF(COUNT(*) FILTER (WHERE s.classe_positiva = FALSE), 0), 6) AS falso_positivo_fpr,
-  COUNT(*) FILTER (WHERE s.classe_positiva = TRUE)::int AS positivos,
-  COUNT(*) FILTER (WHERE s.classe_positiva = FALSE)::int AS negativos
-FROM thresholds t
-JOIN vw_scores_classificacao s ON s.classe = t.classe
-GROUP BY t.classe, t.threshold;
-
-CREATE OR REPLACE VIEW vw_auc_classificacao AS
-WITH ordenado AS (
-  SELECT
-    classe,
-    falso_positivo_fpr,
-    recall_tpr,
-    LAG(falso_positivo_fpr) OVER (PARTITION BY classe ORDER BY falso_positivo_fpr, recall_tpr) AS prev_fpr,
-    LAG(recall_tpr) OVER (PARTITION BY classe ORDER BY falso_positivo_fpr, recall_tpr) AS prev_tpr
-  FROM vw_roc_classificacao
-  WHERE falso_positivo_fpr IS NOT NULL
-    AND recall_tpr IS NOT NULL
-),
-auc AS (
-  SELECT
-    classe,
-    SUM((falso_positivo_fpr - prev_fpr) * (recall_tpr + prev_tpr) / 2.0) AS auc_roc
-  FROM ordenado
-  WHERE prev_fpr IS NOT NULL
-    AND prev_tpr IS NOT NULL
-  GROUP BY classe
-)
-SELECT classe, ROUND(auc_roc, 6) AS auc_roc
-FROM auc;
-
-CREATE OR REPLACE VIEW vw_log_loss_classificacao AS
-WITH por_classe AS (
-  SELECT
-    classe,
-    COUNT(*)::int AS total_avaliado,
-    ROUND(AVG(
-      CASE
-        WHEN classe_positiva THEN -LN(score_classe)
-        ELSE -LN(1 - score_classe)
-      END
-    ), 6) AS log_loss_binario
-  FROM vw_scores_classificacao
-  GROUP BY classe
-)
-SELECT classe, total_avaliado, log_loss_binario
-FROM por_classe
-UNION ALL
-SELECT 'MACRO' AS classe, SUM(total_avaliado)::int AS total_avaliado, ROUND(AVG(log_loss_binario), 6) AS log_loss_binario
-FROM por_classe;
-
-CREATE OR REPLACE VIEW vw_confianca_ia AS
-SELECT
-  etapa,
-  LEAST(10, GREATEST(1, CEIL(COALESCE(confianca, 0) * 10)::int)) AS faixa_confianca,
-  COUNT(*)::int AS total,
-  ROUND(AVG(confianca), 4) AS confianca_media,
-  COUNT(*) FILTER (WHERE erro_ia = TRUE)::int AS erros_ia
-FROM ia_decisoes
-GROUP BY etapa, LEAST(10, GREATEST(1, CEIL(COALESCE(confianca, 0) * 10)::int));
-
-CREATE OR REPLACE VIEW vw_erros_ia AS
-SELECT ticket_id, workflow_origem, etapa, predicao, confianca, mensagem_erro, criado_em
-FROM ia_decisoes
-WHERE erro_ia = TRUE
-UNION ALL
-SELECT ticket_id, 'AVALIACAO_HUMANA', etapa, decisao_ia, NULL::numeric, tipo_erro, avaliado_em
-FROM avaliacoes_humanas
-WHERE ia_estava_correta = FALSE;
-
-CREATE OR REPLACE VIEW vw_chamados_travados AS
-SELECT
-  id AS ticket_id,
-  titulo,
-  status_nome,
-  triagem_status,
-  classificacao_final,
-  em_aprovacao_fiscal,
-  ultima_acao_workflow,
-  COALESCE(aprovacao_iniciada_em, triado_em, atualizado_em, criado_em) AS desde,
-  ROUND(EXTRACT(EPOCH FROM (NOW() - COALESCE(aprovacao_iniciada_em, triado_em, atualizado_em, criado_em))) / 3600.0, 2) AS horas_parado
-FROM tickets_processados
-WHERE (
-  em_aprovacao_fiscal = TRUE
-  OR triagem_status IN ('TRIAGEM_MANUAL','ERRO_IA','REPROCESSAR_IA')
-  OR ultima_acao_workflow IN ('AGUARDANDO_FISCAL','ERRO_IA_DEDUP','ERRO_IA_CLASSIF')
-)
-AND COALESCE(aprovacao_iniciada_em, triado_em, atualizado_em, criado_em) < NOW() - INTERVAL '24 hours';
-
-CREATE OR REPLACE VIEW vw_tempo_execucao_workflow AS
-SELECT
-  workflow,
-  COALESCE(fase, '') AS fase,
-  COUNT(*)::int AS total_eventos,
-  COUNT(*) FILTER (WHERE erro = TRUE)::int AS total_erros,
-  ROUND(AVG(duracao_ms), 2) AS duracao_media_ms,
-  percentile_cont(0.95) WITHIN GROUP (ORDER BY duracao_ms) AS duracao_p95_ms
-FROM workflow_eventos
-GROUP BY workflow, COALESCE(fase, '');
-
-CREATE OR REPLACE VIEW vw_comparacao_prompt_modelo AS
-SELECT
-  etapa,
-  prompt_version,
-  modelo_ia,
-  versao_modelo,
-  COUNT(*)::int AS total_decisoes,
-  COUNT(*) FILTER (WHERE erro_ia = TRUE)::int AS total_erros_ia,
-  ROUND(AVG(confianca), 4) AS confianca_media,
-  ROUND(AVG(tempo_resposta_ms), 2) AS tempo_medio_ia_ms
-FROM ia_decisoes
-GROUP BY etapa, prompt_version, modelo_ia, versao_modelo;
-
-CREATE OR REPLACE VIEW vw_candidatos_automacao_total AS
-SELECT
-  d.ticket_id,
-  d.etapa,
-  d.predicao,
-  d.confianca,
-  d.prompt_version,
-  d.modelo_ia,
-  d.versao_modelo,
-  d.justificativa,
-  d.criado_em
-FROM ia_decisoes d
-WHERE d.erro_ia = FALSE
-  AND COALESCE(d.confianca, 0) >= 0.95
-  AND d.predicao IN ('DEMO','SOB_DEMANDA','NAO_DUPLICADO')
-  AND NOT EXISTS (
-    SELECT 1
-    FROM avaliacoes_humanas a
-    WHERE a.ticket_id = d.ticket_id
-      AND a.etapa = d.etapa
-      AND a.ia_estava_correta = FALSE
-  );
+  'schema_observabilidade_ok' AS result,
+  CASE WHEN
+    to_regclass('public.ia_decisoes') IS NOT NULL AND
+    to_regclass('public.ia_tentativas_modelo') IS NOT NULL AND
+    to_regclass('public.workflow_eventos') IS NOT NULL AND
+    to_regclass('public.metricas_diarias_automacao') IS NOT NULL AND
+    to_regclass('public.metricas_prompt_version') IS NOT NULL AND
+    to_regclass('public.metricas_workflow_performance') IS NOT NULL AND
+    to_regclass('public.vw_kpi_geral_automacao') IS NOT NULL AND
+    to_regclass('public.vw_kpi_duplicidade') IS NOT NULL AND
+    to_regclass('public.vw_kpi_classificacao') IS NOT NULL
+  THEN 1 ELSE 1 / 0 END AS readiness_gate;
 """
+
+
 
 
 CONSOLIDATE_SQL_EXPR = r"""={{ (() => {
@@ -1181,12 +609,12 @@ WORKFLOW = {
             "alwaysOutputData": True,
         },
         {
-            "parameters": {"operation": "executeQuery", "query": OBSERVABILITY_SCHEMA_SQL + "\nSELECT 'schema_observabilidade_ok' AS result;", "options": {}},
+            "parameters": {"operation": "executeQuery", "query": SCHEMA_READINESS_SQL, "options": {}},
             "type": "n8n-nodes-base.postgres",
             "typeVersion": 2.5,
             "position": [-320, 110],
             "id": "v9-wf05-schema",
-            "name": "PG: Garantir Schema Observabilidade",
+            "name": "PG: Verificar Schema Observabilidade",
             "credentials": PG_CRED,
             "alwaysOutputData": True,
         },
@@ -1248,8 +676,8 @@ WORKFLOW = {
     "connections": {
         "T1. Manual": {"main": [[{"node": "LOG: Início", "type": "main", "index": 0}]]},
         "T2. Schedule 23h": {"main": [[{"node": "LOG: Início", "type": "main", "index": 0}]]},
-        "LOG: Início": {"main": [[{"node": "PG: Garantir Schema Observabilidade", "type": "main", "index": 0}]]},
-        "PG: Garantir Schema Observabilidade": {"main": [[{"node": "PG: Consolidar Métricas", "type": "main", "index": 0}]]},
+        "LOG: Início": {"main": [[{"node": "PG: Verificar Schema Observabilidade", "type": "main", "index": 0}]]},
+        "PG: Verificar Schema Observabilidade": {"main": [[{"node": "PG: Consolidar Métricas", "type": "main", "index": 0}]]},
         "PG: Consolidar Métricas": {"main": [[{"node": "Alerta necessário?", "type": "main", "index": 0}]]},
         "Alerta necessário?": {"main": [[{"node": "Email: Alerta Métricas", "type": "main", "index": 0}], [{"node": "LOG: Fim", "type": "main", "index": 0}]]},
         "Email: Alerta Métricas": {"main": [[{"node": "LOG: Fim", "type": "main", "index": 0}]]},
@@ -1441,15 +869,6 @@ _apply_post_confirmation_updates()
 
 
 def _apply_experiment_updates() -> None:
-    schema_path = DIR.parents[2] / "database" / "init_v9.sql"
-    for node in WORKFLOW["nodes"]:
-        if node.get("name") == "PG: Garantir Schema Observabilidade":
-            node["parameters"]["query"] = (
-                schema_path.read_text(encoding="utf-8")
-                + "\nSELECT 'schema_observabilidade_ok' AS result;"
-            )
-            break
-
     # A amostragem científica é estratificada pelo conferir_gabarito.py.
     # O WF05 não deve criar uma amostra aleatória concorrente durante o benchmark.
     obsolete = {

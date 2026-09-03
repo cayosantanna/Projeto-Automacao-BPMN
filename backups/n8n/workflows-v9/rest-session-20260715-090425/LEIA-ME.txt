@@ -1,7 +1,0 @@
-BACKUP DE WORKFLOWS V9
-======================
-
-Esta pasta foi criada automaticamente antes de um deploy por sessao REST.
-Os arquivos JSON sao snapshots dos workflows que estavam publicados no n8n.
-Use-os somente para auditoria ou recuperacao; os builders da pasta Versao9
-continuam sendo a fonte editavel dos workflows atuais.

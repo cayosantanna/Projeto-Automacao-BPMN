@@ -42,7 +42,8 @@ deduplicação. O corpus lógico deve agregar as dez partições abaixo.
 
 ## Gates antes do benchmark
 
-1. Dupla revisão cega dos gabaritos e adjudicação das divergências.
+1. Dois revisores independentes, cegos às predições e aos rótulos um do outro,
+   com adjudicação das divergências.
 2. Auditoria dos 100 núcleos dedup e 40 núcleos classificatórios.
 3. Auditoria estratificada de aproximadamente 200 textos renderizados.
 4. Congelamento dos hashes deste manifesto, prompt, schema, código e configuração.

@@ -46,6 +46,7 @@ TEST_PREFIX = "[TESTE_AUTOMATIZADO_E2E_WF06_LOCAL_V18]"
 RUN_RE = re.compile(r"^VALIDACAO-WF06-E2E-[0-9]{8}T[0-9]{12}Z$")
 MUTATION_CONFIRMATION = "EXECUTAR_E2E_SINTETICO_WF06_LOCAL_V18"
 QUEUE_LOCK_KEY = 9062026
+WF06_WORKFLOW_ID = "ZpQ0H9uV9Fila06"
 EXPECTED_CLASSIFICATION = "TRIAGEM_MANUAL"
 EXPECTED_TERMINAL = "TRIAGEM_MANUAL"
 ACTIVE_QUEUE_STATES = (
@@ -244,14 +245,14 @@ def _docker_environment() -> dict[str, str]:
             "inspect",
             "--format",
             "{{range .Config.Env}}{{println .}}{{end}}",
-            "n8n",
+            "n8n-task-runners",
         ],
         capture_output=True,
         text=True,
         check=False,
     )
     if process.returncode:
-        raise RuntimeError(process.stderr.strip() or "Não foi possível inspecionar o n8n")
+        raise RuntimeError(process.stderr.strip() or "Não foi possível inspecionar o runner externo")
     values: dict[str, str] = {}
     for line in process.stdout.splitlines():
         if "=" in line:
@@ -264,7 +265,7 @@ def snapshot_runtime_profile() -> dict[str, str]:
     environment = _docker_environment()
     missing = [key for key in PROFILE_KEYS if key not in environment]
     if missing:
-        raise RuntimeError("Perfil n8n incompleto: " + ", ".join(missing))
+        raise RuntimeError("Perfil do runner externo incompleto: " + ", ".join(missing))
     return {key: environment[key] for key in PROFILE_KEYS}
 
 
@@ -334,7 +335,7 @@ def recreate_n8n(profile: dict[str, str], timeout_seconds: float = 120.0) -> Non
             "up",
             "-d",
             "--force-recreate",
-            "n8n",
+            "n8n-task-runners",
         ],
         cwd=ROOT / "n8n",
         env=environment,
@@ -343,7 +344,7 @@ def recreate_n8n(profile: dict[str, str], timeout_seconds: float = 120.0) -> Non
         check=False,
     )
     if process.returncode:
-        raise RuntimeError(process.stderr.strip() or "Falha ao recriar o n8n")
+        raise RuntimeError(process.stderr.strip() or "Falha ao recriar o runner externo")
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         try:
@@ -478,7 +479,18 @@ def assert_no_active_n8n_executions(base_url: str, user: str, password: str) -> 
         concurrent = int(data.get("concurrentExecutionsCount") or 0) if isinstance(data, dict) else 0
         terminal = {"success", "error", "canceled", "crashed"}
         active = [row for row in rows if str(row.get("status") or "").lower() not in terminal]
-        active_count = max(concurrent, len(active))
+        # O WF06 dispara a cada minuto. Quando a pré-condição separada confirma
+        # ausência de fila externa, esse polling vazio não é interferência e a
+        # recriação do perfil o encerra de forma controlada. Qualquer outra
+        # execução continua bloqueando o ensaio.
+        ignored_wf06 = sum(
+            1 for row in active if str(row.get("workflowId") or "") == WF06_WORKFLOW_ID
+        )
+        active = [row for row in active if str(row.get("workflowId") or "") != WF06_WORKFLOW_ID]
+        active_count = (
+            max(max(0, concurrent - ignored_wf06), len(active))
+            if concurrent >= 0 else len(active)
+        )
         if active_count:
             raise RuntimeError(f"Há {active_count} execução(ões) n8n em andamento")
     finally:

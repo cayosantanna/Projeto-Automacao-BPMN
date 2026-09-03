@@ -27,10 +27,11 @@ from sklearn.metrics import (
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = (
-    ROOT / "avaliacao" / "config" / "selecao_modelos_supervisionados_v1.json"
+    ROOT / "avaliacao" / "config" / "selecao_modelos_supervisionados_v2.json"
 )
 CLASS_LABELS = ("OBRA", "DEMO", "SOB_DEMANDA", "TRIAGEM_MANUAL")
 DEDUP_LABELS = ("NAO_DUPLICADO", "DUPLICADO")
+ALL_TASKS = ("classification", "deduplication")
 BOOL_TEXT = {"True": True, "False": False}
 FLOAT_REL_TOL = 1e-9
 FLOAT_ABS_TOL = 1e-10
@@ -171,6 +172,21 @@ def unique_by(
             f"{context}: chaves vazias={empty[:3]}, duplicadas={duplicates[:3]}"
         )
     return {value: row for value, row in zip(values, rows)}
+
+
+def task_rows(
+    payload: Any,
+    tasks: Sequence[str],
+    *,
+    context: str,
+) -> list[dict[str, Any]]:
+    """Valida e recorta uma lista de artefatos para o escopo solicitado."""
+    if not isinstance(payload, list) or any(
+        not isinstance(row, dict) for row in payload
+    ):
+        raise ResultValidationError(f"{context}: lista de objetos ausente/inválida")
+    selected = set(tasks)
+    return [row for row in payload if row.get("task") in selected]
 
 
 def expected_combinations(config: dict[str, Any]) -> set[str]:
@@ -1154,16 +1170,18 @@ def _validate_paired_groups(
     observed: Sequence[dict[str, str]],
     predictions: dict[str, list[dict[str, Any]]],
     config: dict[str, Any],
+    *,
+    tasks: Sequence[str] = ALL_TASKS,
 ) -> int:
     observed_by_id = unique_by(observed, "contrast_id", context="pareado/grupos")
     expected_ids = {
         item["id"]
-        for task in ("classification", "deduplication")
+        for task in tasks
         for item in config["paired_comparisons"][task]
     }
     if set(observed_by_id) != expected_ids:
         raise ResultValidationError("IDs das comparações pareadas divergentes")
-    for task in ("classification", "deduplication"):
+    for task in tasks:
         task_expected: list[dict[str, Any]] = []
         p_values: list[float] = []
         for comparison in config["paired_comparisons"][task]:
@@ -1230,6 +1248,8 @@ def _validate_paired_objectives(
     observed: Sequence[dict[str, str]],
     predictions: dict[str, list[dict[str, Any]]],
     config: dict[str, Any],
+    *,
+    tasks: Sequence[str] = ALL_TASKS,
 ) -> int:
     expected_keys = {
         (item["id"], metric)
@@ -1250,6 +1270,7 @@ def _validate_paired_objectives(
                 "full_automation_coverage",
             ),
         }.items()
+        if task in tasks
         for item in config["paired_comparisons"][task]
         for metric in metrics
     }
@@ -1273,7 +1294,9 @@ def _validate_paired_objectives(
         "decision_coverage": "higher",
         "full_automation_coverage": "higher",
     }
-    for task_offset, task in enumerate(("classification", "deduplication")):
+    task_offsets = {"classification": 0, "deduplication": 1}
+    for task in tasks:
+        task_offset = task_offsets[task]
         comparisons = config["paired_comparisons"][task]
         baseline_id = comparisons[0]["baseline"]
         baseline_by_unit = {row["unit_id"]: row for row in predictions[baseline_id]}
@@ -1373,6 +1396,7 @@ def _validate_xai(
     selected: dict[str, str],
     evidence_status: dict[str, str],
     family_csv: Sequence[dict[str, str]],
+    tasks: Sequence[str] = ALL_TASKS,
 ) -> int:
     if not isinstance(xai, list):
         raise ResultValidationError("xai.json não contém lista")
@@ -1380,7 +1404,7 @@ def _validate_xai(
     by_task: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for item in xai:
         by_task[str(item.get("task"))].append(item)
-    if set(by_task) != {"classification", "deduplication"} or any(
+    if set(by_task) != set(tasks) or any(
         len(by_task[task]) != expected_count for task in by_task
     ):
         raise ResultValidationError("XAI não contém um finalista por tarefa")
@@ -1476,26 +1500,28 @@ def _validate_performance(
     *,
     config: dict[str, Any],
     selected: dict[str, str],
+    tasks: Sequence[str] = ALL_TASKS,
 ) -> int:
     if not isinstance(payload, list):
         raise ResultValidationError("Benchmark de latência não contém lista")
-    dedup_metadata = expected_combination_metadata(selected["deduplication"])
-    dedup_uses_embedding = bool(
-        config["representations"][str(dedup_metadata["representation"])][
-            "uses_embedding"
-        ]
-    )
-    expected_scenarios = {
-        "classification": {"classification_raw_text"},
-        "deduplication": (
+    expected_scenarios: dict[str, set[str]] = {}
+    if "classification" in tasks:
+        expected_scenarios["classification"] = {"classification_raw_text"}
+    if "deduplication" in tasks:
+        dedup_metadata = expected_combination_metadata(selected["deduplication"])
+        dedup_uses_embedding = bool(
+            config["representations"][str(dedup_metadata["representation"])][
+                "uses_embedding"
+            ]
+        )
+        expected_scenarios["deduplication"] = (
             {
                 "deduplication_reference_embedding_cached",
                 "deduplication_no_embedding_cache",
             }
             if dedup_uses_embedding
             else {"deduplication_raw_text_tfidf"}
-        ),
-    }
+        )
     expected_count = sum(len(values) for values in expected_scenarios.values())
     if len(payload) != expected_count or len(csv_rows) != len(payload):
         raise ResultValidationError(
@@ -1555,8 +1581,126 @@ def _validate_performance(
     return len(payload)
 
 
+def _validate_retrieval(
+    output_dir: Path,
+    *,
+    result: dict[str, Any],
+    config: dict[str, Any],
+) -> int:
+    summary_csv = read_csv(output_dir / "recuperacao_resumo.csv")
+    detail_csv = read_csv(output_dir / "recuperacao_detalhes.csv")
+    payload = json.loads((output_dir / "recuperacao.json").read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ResultValidationError("recuperacao.json inválido")
+    summary_json = payload.get("summary")
+    detail_json = payload.get("details")
+    result_summary = result.get("retrieval")
+    if not all(isinstance(item, list) for item in (summary_json, detail_json, result_summary)):
+        raise ResultValidationError("Artefatos de recuperação incompletos")
+
+    expected_representations = {"tfidf"} | {
+        str(item["id"]) for item in config["embeddings"]
+    }
+    summary_by_representation = unique_by(
+        summary_csv, "representation", context="recuperacao_resumo.csv"
+    )
+    summary_json_by_representation = unique_by(
+        summary_json, "representation", context="recuperacao.json/summary"
+    )
+    result_by_representation = unique_by(
+        result_summary, "representation", context="resultados.json/retrieval"
+    )
+    if not (
+        set(summary_by_representation)
+        == set(summary_json_by_representation)
+        == set(result_by_representation)
+        == expected_representations
+    ):
+        raise ResultValidationError("Recuperação não contém os quatro candidatos")
+
+    detail_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in detail_csv:
+        key = (str(row.get("representation")), str(row.get("query_case_id")))
+        if not all(key) or key in detail_by_key:
+            raise ResultValidationError(f"Detalhe de recuperação duplicado/inválido: {key}")
+        if key[0] not in expected_representations:
+            raise ResultValidationError(f"Representação de recuperação desconhecida: {key[0]}")
+        rank = int(row["rank"])
+        reciprocal_rank = parse_float(
+            row.get("reciprocal_rank"), context=f"recuperacao/{key}/reciprocal_rank"
+        )
+        parsed = {
+            **row,
+            "rank": rank,
+            "reciprocal_rank": reciprocal_rank,
+            "hit_at_1": parse_bool(row["hit_at_1"], context=f"recuperacao/{key}/hit1"),
+            "hit_at_5": parse_bool(row["hit_at_5"], context=f"recuperacao/{key}/hit5"),
+            "hit_at_20": parse_bool(row["hit_at_20"], context=f"recuperacao/{key}/hit20"),
+        }
+        if rank < 1 or not math.isclose(reciprocal_rank, 1.0 / rank, abs_tol=FLOAT_ABS_TOL):
+            raise ResultValidationError(f"Rank recíproco inválido: {key}")
+        if (
+            parsed["hit_at_1"] != (rank <= 1)
+            or parsed["hit_at_5"] != (rank <= 5)
+            or parsed["hit_at_20"] != (rank <= 20)
+        ):
+            raise ResultValidationError(f"Indicador de recuperação inválido: {key}")
+        detail_by_key[key] = parsed
+
+    detail_json_by_key = {
+        (str(row.get("representation")), str(row.get("query_case_id"))): row
+        for row in detail_json
+    }
+    if len(detail_json_by_key) != len(detail_json) or set(detail_json_by_key) != set(detail_by_key):
+        raise ResultValidationError("Detalhes JSON/CSV de recuperação divergentes")
+    for key, expected_row in detail_json_by_key.items():
+        for field, value in expected_row.items():
+            assert_close(detail_by_key[key].get(field), value, context=f"recuperacao_detalhe/{key}/{field}")
+
+    queries_by_representation: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    for (representation, query), row in detail_by_key.items():
+        queries_by_representation[representation][query] = row
+    reference_universe: dict[str, str] | None = None
+    for representation in sorted(expected_representations):
+        rows = list(queries_by_representation[representation].values())
+        summary_row = summary_by_representation[representation]
+        candidates = int(summary_row["candidates_per_query"])
+        if candidates < 1 or any(int(row["rank"]) > candidates for row in rows):
+            raise ResultValidationError(f"Pool de recuperação inválido: {representation}")
+        universe = {
+            str(row["query_case_id"]): str(row["expected_reference_case_id"])
+            for row in rows
+        }
+        if reference_universe is None:
+            reference_universe = universe
+        elif universe != reference_universe:
+            raise ResultValidationError("Universo de consultas diverge entre representações")
+        ranks = np.asarray([int(row["rank"]) for row in rows], dtype=float)
+        recomputed = {
+            "representation": representation,
+            "queries": len(rows),
+            "candidates_per_query": candidates,
+            "recall_at_1": float(np.mean(ranks <= 1)),
+            "recall_at_5": float(np.mean(ranks <= 5)),
+            "recall_at_20": float(np.mean(ranks <= 20)),
+            "mrr": float(np.mean(1.0 / ranks)),
+            "ndcg_at_20": float(
+                np.mean(np.where(ranks <= 20, 1.0 / np.log2(ranks + 1.0), 0.0))
+            ),
+            "median_rank": float(np.median(ranks)),
+        }
+        for field, value in recomputed.items():
+            assert_close(summary_row.get(field), value, context=f"recuperacao_resumo/{representation}/{field}")
+            assert_close(summary_json_by_representation[representation].get(field), value, context=f"recuperacao_json/{representation}/{field}")
+            assert_close(result_by_representation[representation].get(field), value, context=f"recuperacao_resultado/{representation}/{field}")
+    return len(detail_by_key)
+
+
 def _validate_implementation(
-    protocol: dict[str, Any], environment: dict[str, Any], config_path: Path
+    protocol: dict[str, Any],
+    environment: dict[str, Any],
+    config_path: Path,
+    output_dir: Path,
 ) -> str:
     implementation = protocol.get("implementation")
     if not isinstance(implementation, dict) or implementation != environment.get("implementation"):
@@ -1572,6 +1716,25 @@ def _validate_implementation(
     if not isinstance(source_files, dict) or set(source_files) != set(expected_paths):
         raise ResultValidationError("Arquivos-fonte congelados divergentes")
     source_hashes: dict[str, str] = {}
+    snapshot_names = {
+        "selection_executor": "selecionar_modelos_supervisionados.py",
+        "training_helper": "treinar_modelo_local.py",
+        "benchmark_requirements": "requirements-benchmark.txt",
+        "hybrid_requirements": "requirements-hybrid.txt",
+        "granite_requirements": "requirements-granite.txt",
+    }
+    snapshot_manifest_path = output_dir / "source_snapshot" / "manifest.json"
+    snapshot_manifest = (
+        json.loads(snapshot_manifest_path.read_text(encoding="utf-8"))
+        if snapshot_manifest_path.is_file()
+        else None
+    )
+    if isinstance(snapshot_manifest, dict) and (
+        snapshot_manifest.get("protocol_sha256") != protocol.get("protocol_sha256")
+        or snapshot_manifest.get("run_fingerprint")
+        != implementation.get("run_fingerprint")
+    ):
+        raise ResultValidationError("Manifesto do snapshot de fontes divergente")
     for name, expected_path in expected_paths.items():
         item = source_files[name]
         resolved = expected_path.resolve()
@@ -1579,7 +1742,22 @@ def _validate_implementation(
             raise ResultValidationError(f"Caminho-fonte divergente: {name}")
         observed_sha = sha256_file(resolved)
         if item.get("sha256") != observed_sha:
-            raise ResultValidationError(f"Fonte alterada após congelamento: {name}")
+            if not isinstance(snapshot_manifest, dict):
+                raise ResultValidationError(
+                    f"Fonte alterada após congelamento e snapshot ausente: {name}"
+                )
+            snapshot_item = snapshot_manifest.get("files", {}).get(name, {})
+            snapshot_path = output_dir / "source_snapshot" / snapshot_names[name]
+            if (
+                snapshot_item.get("path") != snapshot_names[name]
+                or snapshot_item.get("sha256") != item.get("sha256")
+                or not snapshot_path.is_file()
+                or sha256_file(snapshot_path) != item.get("sha256")
+            ):
+                raise ResultValidationError(
+                    f"Snapshot da fonte congelada inválido: {name}"
+                )
+            observed_sha = str(item["sha256"])
         source_hashes[name] = observed_sha
     packages = environment.get("packages")
     if packages != implementation.get("packages"):
@@ -1596,7 +1774,12 @@ def _validate_implementation(
     return expected_fingerprint
 
 
-def validate(output_dir: Path, config_path: Path) -> dict[str, Any]:
+def validate(
+    output_dir: Path,
+    config_path: Path,
+    *,
+    tasks: Sequence[str] | None = None,
+) -> dict[str, Any]:
     required = [
         "ambiente.json",
         "protocolo_congelado.json",
@@ -1609,6 +1792,8 @@ def validate(output_dir: Path, config_path: Path) -> dict[str, Any]:
         "comparacao_pareada_grupos.csv",
         "comparacao_pareada_objetivos.csv",
         "recuperacao_resumo.csv",
+        "recuperacao_detalhes.csv",
+        "recuperacao.json",
         "xai.json",
         "xai_familias.csv",
         "latencia_finalistas.json",
@@ -1619,6 +1804,17 @@ def validate(output_dir: Path, config_path: Path) -> dict[str, Any]:
     if missing:
         raise ResultValidationError(f"Arquivos ausentes: {missing}")
     config = json.loads(config_path.read_text(encoding="utf-8"))
+    explicit_task_scope = tasks is not None
+    requested_tasks = tuple(
+        tasks or config.get("execution_tasks", list(ALL_TASKS))
+    )
+    selected_tasks = tuple(
+        task for task in ALL_TASKS if task in set(requested_tasks)
+    )
+    if not selected_tasks or set(requested_tasks) - set(ALL_TASKS):
+        raise ResultValidationError(
+            f"Escopo de tarefas inválido: {list(requested_tasks)}"
+        )
     protocol = json.loads((output_dir / "protocolo_congelado.json").read_text(encoding="utf-8"))
     environment = json.loads((output_dir / "ambiente.json").read_text(encoding="utf-8"))
     result = json.loads((output_dir / "resultados.json").read_text(encoding="utf-8"))
@@ -1628,7 +1824,9 @@ def validate(output_dir: Path, config_path: Path) -> dict[str, Any]:
         raise ResultValidationError("Protocolo congelado não é idêntico à configuração")
     if environment.get("protocol_path") != str(config_path.resolve()) or environment.get("protocol_sha256") != protocol_sha:
         raise ResultValidationError("Ambiente aponta para protocolo divergente")
-    fingerprint = _validate_implementation(protocol, environment, config_path)
+    fingerprint = _validate_implementation(
+        protocol, environment, config_path, output_dir
+    )
     if {protocol.get("run_fingerprint"), result.get("run_fingerprint"), fingerprint} != {fingerprint}:
         raise ResultValidationError("Fingerprint de execução inconsistente")
     for context, payload in (("resultado", result), ("config", config)):
@@ -1640,14 +1838,32 @@ def validate(output_dir: Path, config_path: Path) -> dict[str, Any]:
     if result.get("dataset") != dataset:
         raise ResultValidationError("Auditoria do dataset divergente no resultado")
 
-    expected = expected_combinations(config)
+    all_expected = expected_combinations(config)
+    expected = {
+        combination_id
+        for combination_id in all_expected
+        if expected_combination_metadata(combination_id)["task"]
+        in selected_tasks
+    }
     results_list = result.get("results")
     if not isinstance(results_list, list):
         raise ResultValidationError("Lista de resultados ausente")
-    observed_results = unique_by(results_list, "combination_id", context="resultados.json")
+    all_observed_results = unique_by(
+        results_list, "combination_id", context="resultados.json"
+    )
+    if set(all_observed_results) - all_expected:
+        raise ResultValidationError(
+            "Matriz contém combinações desconhecidas: "
+            f"{sorted(set(all_observed_results)-all_expected)[:3]}"
+        )
+    observed_results = {
+        combination_id: item
+        for combination_id, item in all_observed_results.items()
+        if combination_id in expected
+    }
     if set(observed_results) != expected:
         raise ResultValidationError(
-            f"Matriz incompleta: ausentes={sorted(expected-set(observed_results))[:3]}, extras={sorted(set(observed_results)-expected)[:3]}"
+            f"Matriz incompleta no escopo: ausentes={sorted(expected-set(observed_results))[:3]}"
         )
     for combination_id, item in observed_results.items():
         metadata = expected_combination_metadata(combination_id)
@@ -1667,7 +1883,11 @@ def validate(output_dir: Path, config_path: Path) -> dict[str, Any]:
     for row in folds_csv:
         combination_id = row.get("combination_id", "")
         if combination_id not in expected:
-            raise ResultValidationError(f"Dobra de combinação desconhecida: {combination_id}")
+            if combination_id not in all_expected:
+                raise ResultValidationError(
+                    f"Dobra de combinação desconhecida: {combination_id}"
+                )
+            continue
         metadata = expected_combination_metadata(combination_id)
         for key in ("task", "representation", "classifier"):
             if row.get(key) != metadata[key]:
@@ -1719,7 +1939,11 @@ def validate(output_dir: Path, config_path: Path) -> dict[str, Any]:
     for row in raw_predictions:
         combination_id = row.get("combination_id", "")
         if combination_id not in expected:
-            raise ResultValidationError(f"Predição de combinação desconhecida: {combination_id}")
+            if combination_id not in all_expected:
+                raise ResultValidationError(
+                    f"Predição de combinação desconhecida: {combination_id}"
+                )
+            continue
         fold = int(row["fold"])
         key = (combination_id, row.get("unit_id", ""))
         if key in units_seen:
@@ -1734,7 +1958,7 @@ def validate(output_dir: Path, config_path: Path) -> dict[str, Any]:
         expected_records = int(dataset["classification_model_records"] if item["task"] == "classification" else dataset["deduplication_pairs"])
         if len(prediction_rows[combination_id]) != expected_records:
             raise ResultValidationError(f"{combination_id}: número de predições divergente")
-    for task in ("classification", "deduplication"):
+    for task in selected_tasks:
         task_ids = sorted(cid for cid in expected if cid.startswith(f"{task}__"))
         reference = {row["unit_id"]: (row["gold"], row["group"], row["fold"]) for row in prediction_rows[task_ids[0]]}
         for combination_id in task_ids[1:]:
@@ -1755,7 +1979,16 @@ def validate(output_dir: Path, config_path: Path) -> dict[str, Any]:
         assert_close(item.get("metrics"), metrics, context=f"metrics/{combination_id}")
 
     summary_rows = read_csv(output_dir / "resultados_resumo.csv")
-    summary_by_id = unique_by(summary_rows, "combination_id", context="resultados_resumo.csv")
+    all_summary_by_id = unique_by(
+        summary_rows, "combination_id", context="resultados_resumo.csv"
+    )
+    if set(all_summary_by_id) - all_expected:
+        raise ResultValidationError("Resumo contém combinação desconhecida")
+    summary_by_id = {
+        combination_id: row
+        for combination_id, row in all_summary_by_id.items()
+        if combination_id in expected
+    }
     if set(summary_by_id) != expected:
         raise ResultValidationError("Resumo de resultados incompleto")
     for combination_id in expected:
@@ -1766,17 +1999,27 @@ def validate(output_dir: Path, config_path: Path) -> dict[str, Any]:
     independent_ranking: list[dict[str, Any]] = []
     winners: dict[str, str | None] = {}
     provisional: dict[str, str | None] = {}
-    for task in ("classification", "deduplication"):
+    for task in selected_tasks:
         rows, winner, candidate = _independent_rank(results_list, recomputed, task=task, policy=config["operating_policy"])
         independent_ranking.extend(rows)
         winners[task] = winner
         provisional[task] = candidate
-    ranking_csv = read_csv(output_dir / "ranking.csv")
+    ranking_csv = [
+        row
+        for row in read_csv(output_dir / "ranking.csv")
+        if row.get("task") in selected_tasks
+    ]
     ranking_by_id = unique_by(ranking_csv, "combination_id", context="ranking.csv")
-    result_ranking = result.get("ranking")
-    if not isinstance(result_ranking, list):
-        raise ResultValidationError("Ranking JSON ausente")
-    result_ranking_by_id = unique_by(result_ranking, "combination_id", context="resultados.json/ranking")
+    result_ranking = task_rows(
+        result.get("ranking"),
+        selected_tasks,
+        context="resultados.json/ranking",
+    )
+    result_ranking_by_id = unique_by(
+        result_ranking,
+        "combination_id",
+        context="resultados.json/ranking",
+    )
     if set(ranking_by_id) != expected or set(result_ranking_by_id) != expected:
         raise ResultValidationError("Ranking incompleto")
     for expected_row in independent_ranking:
@@ -1784,34 +2027,40 @@ def validate(output_dir: Path, config_path: Path) -> dict[str, Any]:
         for key, value in expected_row.items():
             assert_close(ranking_by_id[combination_id].get(key), value, context=f"ranking_csv/{combination_id}/{key}")
             assert_close(result_ranking_by_id[combination_id].get(key), value, context=f"ranking_json/{combination_id}/{key}")
-    if result.get("winners") != winners or result.get("provisional_point_candidates") != provisional:
-        raise ResultValidationError("Vencedor/candidato provisório divergente do ranking recalculado")
+    for task in selected_tasks:
+        if (
+            result.get("winners", {}).get(task) != winners[task]
+            or result.get("provisional_point_candidates", {}).get(task)
+            != provisional[task]
+        ):
+            raise ResultValidationError(
+                "Vencedor/candidato provisório divergente do ranking recalculado"
+            )
     selected = {
         task: winners[task] or provisional[task] or next(row["combination_id"] for row in independent_ranking if row["task"] == task)
-        for task in ("classification", "deduplication")
+        for task in selected_tasks
     }
 
-    retrieval = read_csv(output_dir / "recuperacao_resumo.csv")
-    expected_retrieval = {"tfidf"} | {item["id"] for item in config["embeddings"]}
-    if {row.get("representation") for row in retrieval} != expected_retrieval or len(retrieval) != len(expected_retrieval):
-        raise ResultValidationError("Recuperação não contém os quatro candidatos")
-    retrieval_json = result.get("retrieval")
-    if not isinstance(retrieval_json, list) or len(retrieval_json) != len(retrieval):
-        raise ResultValidationError("Recuperação JSON/CSV divergente")
-    retrieval_json_by_id = unique_by(
-        retrieval_json, "representation", context="resultados.json/recuperacao"
+    retrieval_detail_rows = _validate_retrieval(
+        output_dir,
+        result=result,
+        config=config,
     )
-    for row in retrieval:
-        expected_row = retrieval_json_by_id[row["representation"]]
-        for key, value in expected_row.items():
-            assert_close(
-                row.get(key), value, context=f"recuperacao/{row['representation']}/{key}"
-            )
 
-    paired_rows = read_csv(output_dir / "comparacao_pareada_grupos.csv")
-    paired_count = _validate_paired_groups(paired_rows, prediction_rows, config)
-    paired_json = result.get("paired_group_comparison")
-    if not isinstance(paired_json, list) or len(paired_json) != len(paired_rows):
+    paired_rows = [
+        row
+        for row in read_csv(output_dir / "comparacao_pareada_grupos.csv")
+        if row.get("task") in selected_tasks
+    ]
+    paired_count = _validate_paired_groups(
+        paired_rows, prediction_rows, config, tasks=selected_tasks
+    )
+    paired_json = task_rows(
+        result.get("paired_group_comparison"),
+        selected_tasks,
+        context="resultados.json/comparacao_pareada",
+    )
+    if len(paired_json) != len(paired_rows):
         raise ResultValidationError("Comparação pareada JSON/CSV divergente")
     paired_json_by_id = unique_by(
         paired_json, "contrast_id", context="resultados.json/pareado"
@@ -1820,14 +2069,23 @@ def validate(output_dir: Path, config_path: Path) -> dict[str, Any]:
         for key, value in paired_json_by_id[row["contrast_id"]].items():
             assert_close(row.get(key), value, context=f"pareado_json/{row['contrast_id']}/{key}")
 
-    paired_objective_rows = read_csv(
-        output_dir / "comparacao_pareada_objetivos.csv"
-    )
+    paired_objective_rows = [
+        row
+        for row in read_csv(output_dir / "comparacao_pareada_objetivos.csv")
+        if row.get("task") in selected_tasks
+    ]
     paired_objective_count = _validate_paired_objectives(
-        paired_objective_rows, prediction_rows, config
+        paired_objective_rows,
+        prediction_rows,
+        config,
+        tasks=selected_tasks,
     )
-    paired_objective_json = result.get("paired_objective_comparison")
-    if not isinstance(paired_objective_json, list) or len(paired_objective_json) != len(paired_objective_rows):
+    paired_objective_json = task_rows(
+        result.get("paired_objective_comparison"),
+        selected_tasks,
+        context="resultados.json/objetivos_pareados",
+    )
+    if len(paired_objective_json) != len(paired_objective_rows):
         raise ResultValidationError("Objetivos pareados JSON/CSV divergentes")
     paired_objective_json_by_key = {
         (str(row.get("contrast_id")), str(row.get("metric"))): row
@@ -1842,6 +2100,9 @@ def validate(output_dir: Path, config_path: Path) -> dict[str, Any]:
         for field, value in paired_objective_json_by_key[key].items():
             assert_close(row.get(field), value, context=f"pareado_obj_json/{key}/{field}")
     xai_payload = json.loads((output_dir / "xai.json").read_text(encoding="utf-8"))
+    xai_payload = [
+        row for row in xai_payload if row.get("task") in selected_tasks
+    ]
     evidence_status = {
         task: (
             "CONFIDENCE_QUALIFIED_WINNER"
@@ -1850,39 +2111,81 @@ def validate(output_dir: Path, config_path: Path) -> dict[str, Any]:
             if provisional[task] is not None
             else "EXPLORATORY_TOP_RANKED_NO_ELIGIBLE_POLICY"
         )
-        for task in ("classification", "deduplication")
+        for task in selected_tasks
     }
     xai_count = _validate_xai(
         xai_payload,
         config=config,
         selected=selected,
         evidence_status=evidence_status,
-        family_csv=read_csv(output_dir / "xai_familias.csv"),
+        family_csv=[
+            row
+            for row in read_csv(output_dir / "xai_familias.csv")
+            if row.get("task") in selected_tasks
+        ],
+        tasks=selected_tasks,
     )
-    if result.get("xai") != xai_payload or result.get("xai_complete") is not True:
+    result_xai = task_rows(
+        result.get("xai"), selected_tasks, context="resultados.json/xai"
+    )
+    if result_xai != xai_payload:
         raise ResultValidationError("XAI divergente/incompleto no resultado")
     performance_payload = json.loads((output_dir / "latencia_finalistas.json").read_text(encoding="utf-8"))
-    latency_count = _validate_performance(performance_payload, read_csv(output_dir / "latencia_finalistas.csv"), config=config, selected=selected)
-    if result.get("performance_benchmark") != performance_payload or result.get("performance_benchmark_complete") is not True:
+    performance_payload = [
+        row
+        for row in performance_payload
+        if row.get("task") in selected_tasks and row.get("status") == "COMPLETED"
+    ]
+    performance_csv = [
+        row
+        for row in read_csv(output_dir / "latencia_finalistas.csv")
+        if row.get("task") in selected_tasks and row.get("status") == "COMPLETED"
+    ]
+    latency_count = _validate_performance(
+        performance_payload,
+        performance_csv,
+        config=config,
+        selected=selected,
+        tasks=selected_tasks,
+    )
+    result_performance = [
+        row
+        for row in task_rows(
+            result.get("performance_benchmark"),
+            selected_tasks,
+            context="resultados.json/performance_benchmark",
+        )
+        if row.get("task") in selected_tasks and row.get("status") == "COMPLETED"
+    ]
+    if result_performance != performance_payload:
         raise ResultValidationError("Benchmark de desempenho divergente/incompleto")
 
     expected_by_task = Counter(cid.split("__", 1)[0] for cid in expected)
     return {
         "schema": "projeto-ic-validacao-resultados-selecao-v2",
         "validated_at": datetime.now(timezone.utc).isoformat(),
-        "status": "VALID",
+        "status": (
+            "VALID_PARTIAL_TASK_SCOPE"
+            if explicit_task_scope
+            else "VALID"
+            if set(selected_tasks) == set(ALL_TASKS)
+            else "VALID_CONFIGURED_TASK_SCOPE"
+        ),
+        "validated_tasks": list(selected_tasks),
         "output_dir": str(output_dir),
         "protocol_sha256": protocol_sha,
         "run_fingerprint": fingerprint,
         "configurations": len(expected),
         "classification_configurations": expected_by_task["classification"],
         "deduplication_configurations": expected_by_task["deduplication"],
-        "predictions": len(raw_predictions),
-        "fold_rows": len(folds_csv),
+        "predictions": sum(len(rows) for rows in prediction_rows.values()),
+        "fold_rows": sum(len(rows) for rows in folds_by_combination.values()),
         "paired_group_comparisons": paired_count,
         "paired_objective_comparisons": paired_objective_count,
         "xai_finalists": xai_count,
         "latency_scenarios": latency_count,
+        "retrieval_detail_rows": retrieval_detail_rows,
+        "retrieval_metrics_recomputed": True,
         "metrics_recomputed_from_oof": True,
         "ranking_recomputed": True,
         "development_only": True,
@@ -1896,14 +2199,27 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--saida", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument(
+        "--task",
+        choices=list(ALL_TASKS),
+        help=(
+            "Valida somente uma tarefa concluída de uma rodada parcial. "
+            "O status será VALID_PARTIAL_TASK_SCOPE e não validará a rodada inteira."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     output_dir = args.saida.resolve()
-    audit = validate(output_dir, args.config.resolve())
-    audit_path = output_dir / "validacao_resultados.json"
+    tasks = (args.task,) if args.task else None
+    audit = validate(output_dir, args.config.resolve(), tasks=tasks)
+    audit_path = output_dir / (
+        f"validacao_resultados_{args.task}.json"
+        if args.task
+        else "validacao_resultados.json"
+    )
     audit_path.write_text(
         json.dumps(audit, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",

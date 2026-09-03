@@ -1,6 +1,10 @@
 # 📋 GUIA COMPLETO DE DEPLOYMENT E TESTES
 **Versão 8 - n8n + GLPI Automation**
 
+> **Snapshot histórico substituído pela V9.** As alegações de completude e
+> produção deste guia não foram revalidadas e não representam o estado atual.
+> Use `../../tutorial_reproducao_e_implantacao.md`.
+
 ---
 
 ## 1. PRÉ-REQUISITOS
@@ -558,8 +562,7 @@ Antes de declarar 100% funcional:
 
 ---
 
-**Status: ✅ 100% FUNCIONAL**
-
-Todos os componentes testados, validados e prontos para produção.
+**Status histórico:** V8 substituída; nenhuma garantia de correção total ou
+prontidão produtiva é mantida.
 
 Data: 07/05/2026

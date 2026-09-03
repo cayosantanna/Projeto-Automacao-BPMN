@@ -6,6 +6,7 @@ and Docker exec is blocked by the host session.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from datetime import datetime
@@ -99,6 +100,49 @@ def patch_execute_workflow_ids(workflow: dict, ids_by_name: dict[str, str]) -> N
             wf_id["value"] = target_id
         else:
             params["workflowId"] = {"__rl": True, "mode": "id", "value": target_id}
+
+
+def logic_surface(workflow: dict) -> dict:
+    """Retém somente a lógica que deve permanecer idêntica após o deploy."""
+    return {
+        "name": workflow.get("name"),
+        "nodes": workflow.get("nodes", []),
+        "connections": workflow.get("connections", {}),
+        "settings": workflow.get("settings", {}),
+    }
+
+
+def logic_sha256(workflow: dict) -> str:
+    payload = json.dumps(
+        logic_surface(workflow),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def verify_deployed_logic(
+    s: requests.Session,
+    filename: str,
+    workflow_id: str,
+    ids_by_name: dict[str, str],
+) -> None:
+    expected = clean_for_rest(load_workflow(filename))
+    patch_execute_workflow_ids(expected, ids_by_name)
+    expected.pop("active", None)
+    expected.pop("id", None)
+    deployed = get_workflow(s, workflow_id)
+    expected_hash = logic_sha256(expected)
+    deployed_hash = logic_sha256(deployed)
+    if deployed_hash != expected_hash:
+        raise RuntimeError(
+            f"Paridade de lógica falhou para {expected['name']}: "
+            f"esperado={expected_hash} implantado={deployed_hash}"
+        )
+    if deployed.get("active") is not True:
+        raise RuntimeError(f"Paridade falhou: {expected['name']} não está ativo")
+    print(f"[OK] Paridade lógica: {expected['name']} sha256={expected_hash}")
 
 
 def session() -> requests.Session:
@@ -263,9 +307,12 @@ def main() -> None:
     workflows = list_workflows(s)
     ids_by_name = resolve_workflow_ids(workflows)
     save_backups(s, ids_by_name)
+    deployed_ids: dict[str, str] = {}
     for filename in WORKFLOW_FILES:
         wf = load_workflow(filename)
-        update_or_create(s, wf, ids_by_name)
+        deployed_ids[filename] = update_or_create(s, wf, ids_by_name)
+    for filename in WORKFLOW_FILES:
+        verify_deployed_logic(s, filename, deployed_ids[filename], ids_by_name)
     print("[OK] Deploy REST session concluido.")
 
 

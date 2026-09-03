@@ -1,132 +1,75 @@
-# ⚡ QUICK START - GLPI + n8n v8
+# Início rápido — ambiente local V9
 
-## 🚀 Iniciar em 5 minutos
+**Estado:** protótipo operacional; não é implantação produtiva certificada.
 
-```powershell
-# 1. Iniciar containers
-cd C:\Users\Cayo\Documents\projeto-ic\n8n
-docker compose up -d
+## 1. Configure segredos locais
 
-cd C:\Users\Cayo\Documents\projeto-ic\glpi  
-docker compose up -d
+Crie `n8n/.env`, `n8n/.env.local` e `glpi/.env` a partir dos exemplos e troque
+todos os `CHANGE_ME`. Não use senhas descritas em documentação e não versione
+os arquivos reais.
 
-# 2. Ativar plugin (primeira vez)
-docker exec glpi-app php /var/www/html/glpi/bin/console --allow-superuser plugin:install n8nwebhook
-docker exec glpi-app php /var/www/html/glpi/bin/console --allow-superuser plugin:activate n8nwebhook
+## 2. Suba os serviços
 
-# 3. Publicar workflows
-cd C:\Users\Cayo\Documents\projeto-ic\n8n\workflows\Versão8
-python deploy.py --all
-```
-
-## 🧪 Teste Webhook em 2 minutos
-
-**Aba 1 (n8n):**
-- n8n UI → Workflows → WF01 Orquestrador
-- Clique em "T2. Webhook GLPI" → "Listening"
-
-**Aba 2 (GLPI):**
-- GLPI (localhost:8080) → Login: glpi/admin
-- Assistência → Meus chamados → Adicionar
-- Preencha: Título, Tipo (Requisição), Categoria, Descrição
-- Enviar
-
-**Resultado:**
-- Webhook dispara em ~100ms
-- WF01 → WF02 executa classificação
-- PostgreSQL atualiza
-
-## 📊 URLs de Acesso
-
-| Serviço | URL | Login |
-|---------|-----|-------|
-| n8n | http://localhost:5678 | Email/Senha (cadastro) |
-| GLPI | http://localhost:8080 | glpi / admin |
-| Mailpit | http://localhost:1025 | N/A |
-| PostgreSQL | localhost:5432 | glpi / senha |
-
-## 🔧 Comandos Essenciais
+Na raiz do projeto:
 
 ```powershell
-# Verificar status
-docker ps | Select-String "n8n|glpi|postgres|mailpit"
-
-# Ver logs
-docker logs -f n8n          # n8n logs
-docker logs -f glpi-app     # GLPI logs
-
-# Plugin status
-docker exec glpi-app php /var/www/html/glpi/bin/console --allow-superuser plugin:list
-
-# PostgreSQL query
-docker exec projeto-ic-postgres-1 psql -U glpi -d glpi -c "SELECT COUNT(*) FROM tickets_processados;"
-
-# Parar tudo
-docker compose down  # de cada pasta
-
-# Limpar dados
-docker system prune -a
+docker compose -f glpi/docker-compose.yml up -d
+docker compose -f n8n/docker-compose.yml up -d
+./local_ai/scripts/start-local-ai.ps1 -CpuThreads 2 -MaxEmbedBatch 1
 ```
 
-## 🎯 Fluxo de Funcionamento
+Interfaces locais (as portas vêm do `.env`):
 
-```
-GLPI ticket novo
-    ↓
-Plugin dispara webhook
-    ↓
-n8n WF01 (Orquestrador) recebe
-    ↓
-WF01 resolve modo (INCREMENTAL/SCHEDULE/BOOTSTRAP)
-    ↓
-Busca dados GLPI, cria PostgreSQL
-    ↓
-WF02 (Triagem) dispara para cada ticket
-    ↓
-├─ Verifica duplicação
-│  ├─ Se duplicado → espera decisão fiscal (WF03)
-│  └─ Se não duplicado → classifica
-│
-└─ Classifica com IA
-   ├─ OBRA → Email DDI/DG, fecha ticket
-   ├─ DEMO → Move para "Em atendimento (atribuído)"
-   └─ SOB_DEMANDA → Move para "Em atendimento (planejado)"
-    ↓
-PostgreSQL atualiza status
+- GLPI: `http://localhost:9080` por padrão; neste host Windows, use `9180`
+  porque o intervalo que contém 9080 está reservado pelo sistema;
+- n8n: `http://localhost:5678`;
+- Mailpit: `http://localhost:18025`;
+- IA local: `http://127.0.0.1:8090/health`.
+
+Para criar uma homologação sintética totalmente separada, sem copiar chamados:
+
+```powershell
+./avaliacao/operacional/initialize_homolog_env.ps1
+docker compose --env-file glpi/.env.homolog `
+  -f glpi/docker-compose.yml -f glpi/docker-compose.homolog.yml up -d
+docker compose --env-file n8n/.env.homolog `
+  -f n8n/docker-compose.yml -f n8n/docker-compose.homolog.yml up -d
+python avaliacao/operacional/validate_homolog.py
 ```
 
-## 📋 Checklist de Validação
+## 3. Valide e publique V9
 
-- [ ] Docker containers rodando (5/5)
-- [ ] Workflows publicados (3/3)
-- [ ] Plugin GLPI ativo
-- [ ] Webhook dispara ao criar ticket
-- [ ] WF02 classifica corretamente
-- [ ] PostgreSQL armazena dados
-- [ ] Mailpit recebe emails (OBRA)
-- [ ] Sem erros de IA
-- [ ] Schedule executa 06h/12h
-- [ ] Webhook + Schedule concorrentes (OK)
+```powershell
+python n8n/workflows/Versão9/validate_v9_static.py
+python -m pytest -q n8n/workflows/Versão9/test_v9_hard.py
+python n8n/workflows/Versão9/deploy.py
+```
 
-## ⚠️ Troubleshooting Rápido
+O deploy altera o n8n local e deve confirmar seis workflows ativos com
+paridade. O WF06 é o ingresso público do plugin GLPI; não use os fluxos V8.
 
-| Problema | Solução |
-|----------|---------|
-| Webhook não dispara | Ativar plugin: `plugin:activate n8nwebhook` |
-| n8n não responde | `docker restart n8n` |
-| GLPI vazio | Criar ticket via UI (assistência/meus chamados) |
-| PostgreSQL vazio | Executar WF01 manualmente |
-| Email não chega | Verificar Mailpit (localhost:1025) |
-| IA com erro | Ticket marca ERRO_IA, reprocessa depois |
+## 4. Testes seguros
 
-## 📞 Support
+```powershell
+python -m pytest -q -p no:cacheprovider `
+  local_ai/tests `
+  avaliacao/tests `
+  --ignore=avaliacao/tests/test_runtime_integration_live.py `
+  n8n/workflows/Versão9/test_v9_hard.py `
+  n8n/history/tests
 
-- **n8n Docs:** https://docs.n8n.io
-- **GLPI Docs:** https://glpi-project.org/documentation
-- **PostgreSQL:** docker exec projeto-ic-postgres-1 psql -U glpi
+python n8n/history/validate_history.py --check-sources
+```
 
----
+O smoke live exige `RUN_LIVE_INTEGRATION_TESTS=1`; o E2E mutante exige frase de
+confirmação e cleanup. Consulte o guia completo antes de executá-los.
 
-**Status:** ✅ 100% FUNCIONAL - Pronto para Produção
+## 5. Limites
 
-Documentação completa: `DEPLOYMENT_AND_TESTING_GUIDE.md`
+Não use `docker system prune -a` como passo de troubleshooting: pode remover
+imagens e caches de outros projetos. Não execute seeds, calibração ou E2E em
+ambiente produtivo. `scientific_ready=false` é o estado correto até gabarito
+independente e holdout institucional. Como esse projeto excluiu revisão humana
+e em pares, os resultados permitidos são técnicos/de desenvolvimento por proxy.
+
+Guia completo: `docs/tutorial_reproducao_e_implantacao.md`.

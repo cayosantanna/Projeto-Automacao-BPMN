@@ -1,5 +1,13 @@
 # Estado da candidata de release — 16/07/2026
 
+> [!WARNING]
+> **Snapshot histórico, superado pela auditoria de 26/08/2026.** A seleção
+> citada neste documento não sustenta ranking atual: derivados de poucas
+> famílias-fonte não ficaram integralmente no mesmo grupo. Toda classificação
+> permanece sintética e a deduplicação antiga é subdimensionada. Use
+> `auditoria_critica_completa_2026-08-26.md` e
+> `resposta_professor_2026-08-26.md` como estado canônico.
+
 > **SNAPSHOT HISTÓRICO.** Este arquivo não representa sozinho a revisão de
 > 17/08/2026. Desde então, V1–V8 foram preservadas em `n8n/history`, a seleção
 > comparativa v1.3 de 90 configurações terminou com recomputação por validador

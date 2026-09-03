@@ -1,5 +1,12 @@
 # Decisões necessárias antes do teste confirmatório
 
+> Decisão de escopo em 01/09/2026: o projeto não realizará verificação humana
+> nem revisão em pares. Portanto, não existe gabarito independente elegível
+> para a avaliação confirmatória descrita nesta pasta. Os validadores não serão
+> afrouxados: o holdout one-shot permanece bloqueado e resultados com rótulos
+> sintéticos, heurísticos ou derivados do próprio sistema devem ser chamados
+> apenas de evidência técnica, desenvolvimento ou avaliação por rótulo-proxy.
+
 O software pode ser testado tecnicamente sem dupla revisão humana, mas os
 resultados dessa etapa são regressão, integração ou piloto. Um artigo não deve
 chamar esses resultados de validação confirmatória enquanto as decisões abaixo
@@ -92,7 +99,7 @@ chamados abstidos.
 
 ## Estado
 
-`PENDENTE_DE_PRE_REGISTRO`. Nenhuma margem, limite institucional ou baseline
-manual foi inventado pelo código. O piloto remoto de 40 unidades, quando
-executado, serve para validar o contrato, a estabilidade e a coleta de custos;
-não possui potência para uma conclusão confirmatória de não inferioridade.
+`BLOQUEADO_SEM_GABARITO_INDEPENDENTE`. Nenhuma margem, limite institucional ou
+baseline manual foi inventado pelo código. Sem revisão humana, o piloto pode
+validar somente contrato, estabilidade e coleta técnica; não sustenta uma
+conclusão confirmatória de eficácia ou não inferioridade.

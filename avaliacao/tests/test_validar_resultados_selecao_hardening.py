@@ -240,6 +240,29 @@ class HardenedResultValidatorTests(unittest.TestCase):
         with self.assertRaises(validation.ResultValidationError):
             validation.unique_by(rows, "id", context="test")
 
+    def test_task_rows_filters_mixed_artifacts_before_scope_checks(self) -> None:
+        payload = [
+            {"task": "classification", "id": "classification-row"},
+            {"task": "deduplication", "id": "deduplication-row"},
+        ]
+        self.assertEqual(
+            validation.task_rows(
+                payload,
+                ("classification",),
+                context="test",
+            ),
+            [payload[0]],
+        )
+        for invalid in (None, {}, ["not-an-object"]):
+            with self.subTest(invalid=invalid), self.assertRaises(
+                validation.ResultValidationError
+            ):
+                validation.task_rows(
+                    invalid,
+                    ("classification",),
+                    context="test",
+                )
+
     def test_independent_ranking_reproduces_executor_selection(self) -> None:
         def result(combination_id: str, macro_f1: float, fit_seconds: float) -> dict:
             return {

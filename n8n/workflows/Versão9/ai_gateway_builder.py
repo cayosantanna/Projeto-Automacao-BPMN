@@ -19,18 +19,30 @@ const TASK = __TASK__;
 const PROMPT_TEMPLATE = __PROMPT__;
 const RESPONSE_SCHEMA = __SCHEMA__;
 
+// Configuração operacional não secreta congelada no artefato publicável.
+// Segredos ficam fora do Code node e são injetados pelos proxies internos.
+const STATIC_CONFIG = Object.freeze({
+  IA_CONFIANCA_MINIMA:'0.65',
+  IA_EXECUTION_MODE:'OPERATIONAL',
+  IA_FAILOVER_ENABLED:'false',
+  IA_FIXED_MODEL_ROLE:'LOCAL',
+  IA_GENERATION_SEED:'20260702',
+  IA_HTTP_TIMEOUT_MS:'30000',
+  IA_LOCAL_BASE_URL:'http://local-ai-credential-proxy:8080',
+  IA_LOCAL_TIMEOUT_MS:'60000',
+  IA_MODEL_LOCAL:'local-hybrid-v1.8.0',
+  IA_MODEL_SECONDARY:'gemini-3.5-flash',
+  IA_OPERATIONAL_SEQUENCE:'LOCAL',
+  IA_PROVIDER_BACKOFF_BASE_MS:'1500',
+  IA_PROVIDER_BACKOFF_MAX_MS:'15000',
+  IA_PROVIDER_MAX_RETRIES:'3',
+  LOCAL_AI_EMBED_BACKEND:'pytorch_fp32',
+  LOCAL_AI_EMBED_MODEL_REVISION:'835ad14087e140460703cf0fae09f97d469d65c2'
+});
+
 function envValue(name, fallback='') {
-  try {
-    if (typeof $env !== 'undefined' && $env && $env[name] !== undefined) {
-      return String($env[name]);
-    }
-  } catch (e) {}
-  try {
-    if (typeof process !== 'undefined' && process.env && process.env[name] !== undefined) {
-      return String(process.env[name]);
-    }
-  } catch (e) {}
-  return String(fallback);
+  return Object.prototype.hasOwnProperty.call(STATIC_CONFIG, name)
+    ? String(STATIC_CONFIG[name]) : String(fallback);
 }
 
 function truthy(value) {
@@ -412,7 +424,7 @@ const roles = ['LOCAL','SECONDARY'];
 const supportedRoles = [...roles];
 const requestedRoleValid = supportedRoles.includes(requestedRole);
 const fixedRole = supportedRoles.includes(requestedRole) ? requestedRole : 'LOCAL';
-const failoverRequested = truthy(envValue('IA_FAILOVER_ENABLED','true'));
+const failoverRequested = truthy(envValue('IA_FAILOVER_ENABLED','false'));
 const failoverAllowed = failoverRequested && !experimental && !benchmark;
 const expectedModel = String(
   context.ia_expected_model || experimentConfig.ia_expected_model || experimentConfig.model || ''
@@ -421,7 +433,7 @@ const seed = Number(envValue('IA_GENERATION_SEED','20260702')) || 20260702;
 const ticketId = Number(context.id || context.ticket_id || 0) || null;
 const cycleId = `${TASK}-${ticketId || 'NA'}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-const localBaseUrl = envValue('IA_LOCAL_BASE_URL','http://host.docker.internal:8090').replace(/\/+$/, '');
+const localBaseUrl = envValue('IA_LOCAL_BASE_URL','http://local-ai-credential-proxy:8080').replace(/\/+$/, '');
 const localEndpointPath = TASK === 'DEDUPLICACAO' ? '/v1/deduplicate' : '/v1/classify';
 const providers = {
   SECONDARY: {
@@ -432,7 +444,7 @@ const providers = {
     role:'LOCAL', provider:'local-native', model:envValue('IA_MODEL_LOCAL','local-hybrid-v1.8.0'),
     key:envValue('IA_LOCAL_API_TOKEN',''), thinking_profile:'disabled', requires_key:false,
     endpoint:`${localBaseUrl}${localEndpointPath}?include_metadata=1`,
-    timeout_ms:boundedInteger(envValue('IA_LOCAL_TIMEOUT_MS','15000'),15000,2000,120000)
+    timeout_ms:boundedInteger(envValue('IA_LOCAL_TIMEOUT_MS','60000'),60000,2000,120000)
   }
 };
 const fixedProvider = providers[fixedRole] || providers.LOCAL;
@@ -451,8 +463,8 @@ function operationalChain(role) {
     .map(item=>item.trim().toUpperCase())
     .filter((item,index,array)=>supportedRoles.includes(item) && array.indexOf(item)===index);
   if (configured.length > 0) return configured;
-  if (role === 'LOCAL') return [...roles];
-  return [...remotePolicyChain(),'LOCAL'];
+  if (role === 'LOCAL') return ['LOCAL'];
+  return [role];
 }
 const chain = policyViolation ? [] : (failoverAllowed ? operationalChain(fixedRole) : [fixedRole]);
 

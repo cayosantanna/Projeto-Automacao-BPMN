@@ -1,13 +1,12 @@
 {
   "dataset_version": "corpus-v3.0.0-episodico",
-  "gateway_builder_sha256": "f849c76313d3027b910a1b36a090017947879ecd8d37d7c7c6e886d21c73766e",
+  "gateway_builder_sha256": "b7d7b25ae444dd8a08f7094e47dc0f2fb08b124445bed9a70d631d25f10cabee",
   "gateway_policy": {
     "attempt_provenance_table": "ia_tentativas_modelo",
     "confirmatory_failover_enabled": false,
     "confirmatory_one_model_per_run": true,
     "operational_failover": [
-      "LOCAL",
-      "SECONDARY"
+      "LOCAL"
     ]
   },
   "generation_options": {
@@ -24,9 +23,9 @@
     "principal": "local-hybrid-v1.8.0",
     "secundario": "gemini-3.5-flash"
   },
-  "model_policy_sha256": "bbddaa93bf1c62f35de332e94878f345c14f9e85948ea1f3928d38c60b01db4e",
+  "model_policy_sha256": "ca5db3b5ea80270f600fb8bd63253292264a312a7ab7dda9ac0e5c2c3a138dbd",
   "prompt_sha256": {
-    "classificacao": "eaced79e9404d3a2acd861a3c45c4e9a4cacede73e331eef0462b6284d7e8bcd",
+    "classificacao": "132efdb4a32b4a8fc6653e7953a3242f67a05f8a1155aa9398def2f806f84418",
     "deduplicacao": "16fa08e68e7f2d3ca5bc8decd66de3499d43c0082cafcc3726ecbb4755cfeb4c"
   },
   "prompt_versions": {
@@ -40,7 +39,7 @@
   },
   "schema_version": "2.1.0",
   "workflow_sha256": {
-    "WF02": "cf320b70e52fcb0630fb76644549bb3bc13a9f7c456d24b9297e77f0074be212",
-    "WF03": "846d1e16af955faa213a1a2d769f7dad1d74851cafdc39dcce5fd531b631b2cc"
+    "WF02": "312341ec150d8cb16737ad611d0be7d76a757245e08d908e8d7953a50848e405",
+    "WF03": "134f1332a127b0ef6854a2e9bf00acbe21c49399acf77ebfd15671c6cae69b33"
   }
 }

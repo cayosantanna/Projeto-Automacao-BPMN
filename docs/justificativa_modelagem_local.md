@@ -1,5 +1,13 @@
 # Justificativa da modelagem local híbrida
 
+> [!WARNING]
+> **Snapshot histórico, superado pela auditoria de 26/08/2026.** A seleção
+> citada neste documento não sustenta ranking atual: derivados de poucas
+> famílias-fonte não ficaram integralmente no mesmo grupo. Toda classificação
+> permanece sintética e a deduplicação antiga é subdimensionada. Use
+> `auditoria_critica_completa_2026-08-26.md` e
+> `resposta_professor_2026-08-26.md` como estado canônico.
+
 ## Decisão arquitetural
 
 O sistema não usa um único modelo para “raciocinar livremente” sobre todo o
@@ -110,8 +118,8 @@ substituir silenciosamente o candidato avaliado.
 | Híbrido atual | Combina sinal lexical e semântico, probabilidade, abstenção e baixo custo | Ainda depende de holdout independente e pode exigir mais revisão quando falta informação. |
 
 A arquitetura v1.8 foi adotada como candidata de engenharia por adequação e
-testabilidade, não como resultado de uma busca exaustiva. A seleção científica
-v1.3 compara Granite 97M, multilingual-e5-small e multilingual MiniLM,
+testabilidade, não como resultado de uma busca exaustiva. O protocolo corrigido
+V2.1 compara Granite 97M, multilingual-e5-small e multilingual MiniLM,
 TF-IDF/embedding/híbrido realmente isolados, metadados e híbrido+metadados, com
 regressão logística, árvore, SVM, MLP e XGBoost. A comparação posterior com
 Gemini deve usar os mesmos casos, sem fallback e com falhas no denominador.
@@ -136,12 +144,12 @@ Os critérios eliminatórios foram: execução no i3/8 GB, suporte a português,
 operação sem cota por chamado e possibilidade de congelar versão e hash. Os
 critérios de desempate foram latência, capacidade de representar erros de
 digitação, probabilidade calibrável, inspeção do erro e simplicidade de
-reprodução. A busca comparativa de embeddings leves foi formalizada no
-protocolo v1.3 e terminou em 17/08/2026. O Granite híbrido foi o candidato
-provisório das duas tarefas, mas os intervalos permaneceram `UNDERPOWERED`. Até
-o holdout independente, continua sem evidência suficiente para afirmar que o
-Granite 97M é o melhor embedding do domínio — muito menos o melhor embedding
-existente.
+reprodução. A rodada comparativa anterior foi invalidada por dependência entre
+derivados e divergência de hash. No protocolo V2.1 corrigido, a classificação
+foi validada apenas no escopo de desenvolvimento e não qualificou vencedor; a
+deduplicação ficou bloqueada por insuficiência de grupos. Até o holdout
+independente, não há evidência suficiente para afirmar que o Granite 97M é o melhor embedding do domínio —
+muito menos o melhor embedding existente.
 
 ## Configuração reproduzível do candidato v1.8
 
@@ -193,9 +201,10 @@ desenvolvimento e permanecem provisórios até o holdout.
 ## O que a evidência permite concluir
 
 A regressão v1.8 sobre o corpus sintético de desenvolvimento demonstra que o
-pipeline local está funcional, que a política seletiva consegue abster e que a
-versão é operacionalmente superior à v1.1 no mesmo corpus. Ela não demonstra
-eficácia no cotidiano nem superioridade sobre Gemini ou DeepSeek.
+pipeline local está funcional e que a política seletiva consegue abster. As
+comparações históricas com a v1.1 descrevem engenharia no corpus usado, não uma
+estimativa válida de eficácia cotidiana nem superioridade sobre Gemini ou
+DeepSeek.
 
 A afirmação científica final exige, no mínimo:
 
@@ -227,8 +236,8 @@ de duplicidade e para manutenção encaminhada indevidamente como OBRA.
 > região explícita de abstenção. O Granite 350M foi reservado à extração
 > estruturada opcional, fora do caminho decisório padrão, para limitar consumo
 > de memória e variabilidade generativa. A escolha foi motivada por
-> reprodutibilidade, auditabilidade e adequação ao hardware. A seleção entre
-> Granite, E5 e MiniLM e entre cinco classificadores foi então pré-especificada
-> em validação agrupada; sua eficácia
+> reprodutibilidade, auditabilidade e adequação ao hardware. A comparação entre
+> Granite, E5 e MiniLM e entre cinco classificadores foi especificada no
+> protocolo V2.1 com validação agrupada por família-fonte; sua eficácia
 > externa e eventual não inferioridade ao Gemini dependem de avaliação pareada
 > no conjunto independente congelado.

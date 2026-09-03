@@ -1,42 +1,26 @@
-# 📄 Justificativa de Engenharia para Seleção do Candidato de Deduplicação (Post-Hoc Override)
+# Retirada do override pós-hoc de deduplicação
 
-**Documento de Governança e Metodologia Científica**  
-**Versão do Bundle:** `local-hybrid-bundle-v1.9.1` / `v1.8.0`  
-**Classificação Metodológica:** `selection_source = POST_HOC_ENGINEERING_OVERRIDE`  
-**Data:** Agosto de 2026  
+**Estado:** retirado em 26/08/2026
 
----
+O override que comparava posições de ranking e escolhia um candidato de
+deduplicação não deve ser usado. Ele dependia da seleção posteriormente
+invalidada e de episódios nominais derivados de poucas famílias-fonte.
 
-## 1. Contexto da Seleção e Transparência Metodológica
+Não existe candidato substituto autorizado por este documento. O operacional
+permanece `local-hybrid-v1.8.0` por estabilidade de engenharia, não por vitória
+estatística. A tentativa V2.1 de deduplicação foi bloqueada por insuficiência
+de grupos independentes. Qualquer promoção exige novo protocolo viável, ainda
+rotulado como desenvolvimento, seguido de evidência humana, regressão/E2E,
+versão e rollback.
 
-Na etapa de seleção supervisionada de modelos sobre o corpus de desenvolvimento (avaliando 90 configurações de embeddings, classificadores e ablações), o ranking estritamente tabular apontou:
-* **Rank 1 em Deduplicação:** `TF-IDF + Logistic Regression`
-* **Rank 5 em Deduplicação:** `Hybrid (IBM Granite 97M + TF-IDF) + Logistic Regression`
+Critérios mínimos:
 
-O modelo operacional adotado **não corresponde ao primeiro colocado estatístico do ranking automatizado**. Aplicou-se um **override de engenharia (*Post-Hoc Engineering Override*)**, motivado por critérios de robustez fora da distribuição e unificação arquitetural. 
+- grupos por `source_dependency_group_sha256` sem sobreposição;
+- hash de dataset/config reproduzível;
+- FN/FP, NPV, precisão e cobertura com intervalos por família-fonte;
+- recuperação recall@k separada da decisão;
+- calibração, latência e análise dos erros;
+- nenhuma seleção pós-hoc baseada em olhar o holdout.
 
-> [!IMPORTANT]
-> **Transparência Científica:**  
-> Por ter sido formalizado após a observação dos rankings preliminares, este override é tratado formalmente como uma decisão de engenharia *post-hoc*, cuja eficácia definitiva será submetida ao teste confirmatório independente com dados intocados.
-
----
-
-## 2. Fundamentação Técnica da Decisão de Engenharia
-
-### 2.1 Generalização Fora da Distribuição (Paráfrases não Previstas)
-O TF-IDF baseia-se na sobreposição lexical de n-grams de caracteres e palavras. Em ambiente universitário real:
-* *Exemplo:* "O ar split da sala 102 parou de gelar" vs. "Aparelho de climatização do lab 102 está ventilando ar quente".
-* *Vulnerabilidade do TF-IDF:* Falha por baixa sobreposição de n-grams quando os termos variam.
-* *Comportamento do Modelo Híbrido:* O embedding denso do IBM Granite 97M captura a proximidade semântica no espaço vetorial de 384 dimensões, enquanto o TF-IDF ancora a correspondência de códigos e números de sala.
-
-### 2.2 Robustez a Variações Fonéticas e Ruído de Digitação
-Conforme demonstrado no `benchmark_robustez.py`, a combinação de representação densa (Granite 97M) com n-grams de caracteres (3 a 5) garante que perturbações tipográficas severas não destruam a similaridade vetorial com chamados canônicos anteriores.
-
-### 2.3 Unificação de Pipeline e Compartilhamento de Memória
-Manter o embedding Granite 97M compartilhado tanto para a **Triagem/Deduplicação (WF02)** quanto para a **Classificação (WF03)** permite que o runtime local processe a representação vetorial em uma única passagem na CPU, aquecendo o mesmo modelo PyTorch FP32 e reutilizando os tensores de 384 dimensões no cache de sessão.
-
----
-
-## 3. Conclusão
-
-O modelo híbrido permanece documentado no manifesto como o bundle vigente da v1.8.0 / v1.9.1 e terá sua generalização avaliada de forma independente no holdout final.
+O histórico original permanece recuperável pelo Git, mas seus rankings não são
+evidência corrente.

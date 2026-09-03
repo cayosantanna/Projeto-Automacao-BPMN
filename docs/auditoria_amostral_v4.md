@@ -1,5 +1,12 @@
 # Auditoria amostral e decisão da etapa automatizada V4/V4.1
 
+> [!WARNING]
+> **Snapshot histórico.** Alguns artefatos citados na redação original não
+> estão presentes no snapshot atual do repositório; essas referências são
+> mantidas abaixo como nomes históricos, sem link e sem valor de evidência
+> verificável. Para o estado vigente, consulte
+> `auditoria_critica_completa_2026-08-26.md`.
+
 ## Estado e escopo da decisão
 
 Esta auditoria registra a decisão metodológica tomada em 15/07/2026. A etapa
@@ -42,10 +49,10 @@ falso negativo de deduplicação; ela não autoriza gerar novos casos nesta etap
   expansão de 878 tickets e total lógico planejado de 2.078;
 - [`metodologia_avaliacao.md`](../avaliacao/metodologia_avaliacao.md): unidade
   experimental, bootstrap hierárquico e limites de validade;
-- [`resultados_tecnicos_2026-07-14.md`](../avaliacao/resultados/resultados_tecnicos_2026-07-14.md):
-  evidência técnica anterior à ampliação amostral;
-- [`contrato_provedores_2026-07-14.json`](../avaliacao/resultados/contrato_provedores_2026-07-14.json):
-  ensaio redigido dos contratos dos provedores.
+- `resultados_tecnicos_2026-07-14.md`: evidência técnica histórica anterior à
+  ampliação amostral; artefato ausente do snapshot atual;
+- `contrato_provedores_2026-07-14.json`: ensaio histórico dos contratos dos
+  provedores; artefato ausente do snapshot atual.
 
 ## Suficiência do corpus V3
 

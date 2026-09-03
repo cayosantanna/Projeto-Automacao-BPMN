@@ -1,5 +1,13 @@
 # Estado dos resultados técnico-científicos — 15/07/2026
 
+> [!WARNING]
+> **Snapshot histórico, superado pela auditoria de 26/08/2026.** A seleção
+> citada neste documento não sustenta ranking atual: derivados de poucas
+> famílias-fonte não ficaram integralmente no mesmo grupo. Toda classificação
+> permanece sintética e a deduplicação antiga é subdimensionada. Use
+> `auditoria_critica_completa_2026-08-26.md` e
+> `resposta_professor_2026-08-26.md` como estado canônico.
+
 > DOCUMENTO HISTÓRICO. Não representa o bundle v1.8 nem o estado dos testes de
 > 16/07 ou 12/08. Consulte `resposta_professor_selecao_modelos_2026-08-12.md`,
 > `../n8n/workflows/Versão9/TEST_REPORT.md` e o README da raiz antes de citar
@@ -99,7 +107,9 @@ em JSON; não houve avaliação de chamados do corpus.
 | `FREE_CONTINGENCY` | Google `gemini-3.1-flash-lite` | 200 | sim | 1.491 ms | contrato mínimo operacional nesta chamada |
 | `TERTIARY` | DeepSeek `deepseek-v4-flash` | 402 | não | 1.808 ms | conta sem saldo suficiente |
 
-Fonte: [`contrato_provedores_2026-07-15.json`](../avaliacao/resultados/contrato_provedores_2026-07-15.json).
+Fonte histórica declarada na redação original:
+`contrato_provedores_2026-07-15.json`. O arquivo não está presente no snapshot
+atual e, portanto, os valores desta tabela não são evidência revalidável aqui.
 
 O código HTTP 429 não prova que o modelo principal ou o secundário seja menos
 inteligente ou intrinsecamente instável; prova apenas que não havia quota útil
@@ -124,8 +134,12 @@ operação cotidiana, mas não pode substituir silenciosamente o modelo avaliado
 - fallback: desabilitado;
 - dataset efetivamente criado: uma realização dos 35 cenários então
   registrados, totalizando 50 tickets GLPI;
-- manifesto congelado: [`freeze_manifest.json`](../avaliacao/resultados/VALIDACAO-AUTOMATIZADA-20260715-A/freeze_manifest.json);
-- resumo da carga: [`dataset_resumo.md`](../avaliacao/resultados/VALIDACAO-AUTOMATIZADA-20260715-A/dataset_resumo.md).
+- manifesto congelado histórico:
+  `VALIDACAO-AUTOMATIZADA-20260715-A/freeze_manifest.json` (ausente do snapshot
+  atual);
+- resumo histórico da carga:
+  `VALIDACAO-AUTOMATIZADA-20260715-A/dataset_resumo.md` (ausente do snapshot
+  atual).
 
 Essa execução antecede a separação explícita entre `primary33` e `stress2`.
 Logo, seus 50 tickets não correspondem ao futuro ensaio `primary33` com 30
@@ -205,8 +219,9 @@ Os estados finais foram `ATRIBUIDO_DEMO`, `DUPLICADO_FECHADO` e
 completaram seus caminhos, inclusive a confirmação de duplicidade, preservando
 `run_id`, papel e modelo desde o início. A execução continuou marcada com
 `scientific_result=false`, `confirmatory_eligible=false`, sem rótulos humanos e
-sem auditoria humana. O relatório isolado está em
-[`VALIDACAO-FREE-SMOKE-20260715-C/relatorio.md`](../avaliacao/resultados/VALIDACAO-FREE-SMOKE-20260715-C/relatorio.md).
+sem auditoria humana. A redação original citava
+`VALIDACAO-FREE-SMOKE-20260715-C/relatorio.md`, artefato ausente do snapshot
+atual e que não pode ser revalidado por este repositório.
 
 Essa ação da microvalidação foi acionada pelo oráculo determinístico externo de
 teste, não por uma pessoa. Ela comprova que o endpoint real do WF04
@@ -345,9 +360,10 @@ descritas nas seções anteriores.
 O benchmark isolado de 1, 2 e 4 threads selecionou quatro threads pelo critério
 pré-definido de menor p95 no lote de deduplicação de sete textos. O resultado
 selecionado registrou p95 de 501,9 ms nesse lote, p95 de 119,9 ms no lote de
-classificação de um texto e RSS máximo amostrado de 822,0 MB. A evidência está
-em
-[`benchmark_embedding_pytorch_fp32_2026-07-15.json`](../avaliacao/resultados/benchmark_embedding_pytorch_fp32_2026-07-15.json).
+classificação de um texto e RSS máximo amostrado de 822,0 MB. A redação
+original citava `benchmark_embedding_pytorch_fp32_2026-07-15.json`; esse
+artefato está ausente do snapshot atual, então os valores são apenas registro
+histórico não revalidado.
 
 Esses valores medem apenas embeddings aquecidos no processo Python. Não medem
 vetorização TF-IDF, regressão, HTTP, n8n, banco, GLPI ou latência ponta a ponta.

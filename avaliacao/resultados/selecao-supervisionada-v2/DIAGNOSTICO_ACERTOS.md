@@ -1,5 +1,10 @@
 # Diagnóstico de Acertos da IA
 
+> **INVALIDADO EM 2026-08-26:** este diagnóstico deriva da execução V2 com
+> corpus não reproduzível e agrupamento insuficiente das famílias-fonte. Os
+> valores permanecem apenas para auditoria histórica e não são evidência de
+> desempenho.
+
 ## 1. Análise por Classe (Top-3 Candidatos)
 
 ### Modelo: `classification__hybrid__granite97m__linear_svm`

@@ -60,53 +60,118 @@ def _has_env_first_prefix(source: str, start: int, access: str) -> bool:
 
 
 def normalize_n8n_env_access(source: str) -> str:
-    """Make JavaScript environment reads compatible with the n8n Code runtime.
+    """Remove ``$env`` from the deployable workflow representation.
 
-    n8n exposes workflow variables through ``$env``. ``process`` may be absent
-    in the Code task runner, so every legacy ``process.env`` read is normalized
-    to consult ``$env`` first while retaining ``process.env`` as a fallback for
-    local Node-based tests. The transformation is deliberately idempotent.
+    The main n8n process runs with ``N8N_BLOCK_ENV_ACCESS_IN_NODE=true``.
+    Code nodes execute in an external runner whose launcher allowlists only
+    non-secret operational settings. Keeping reads as ``process.env`` makes
+    that boundary explicit; application secrets are never placed in the
+    runner container.
     """
-    guarded = list(_PROCESS_ENV_GUARD_RE.finditer(source))
-    guarded_spans = [(match.start(), match.end()) for match in guarded]
-    replacements: list[tuple[int, int, str]] = []
+    return (
+        source.replace("typeof $env", "typeof process")
+        .replace("$env.", "process.env.")
+        .replace("$env[", "process.env[")
+        .replace("$env", "process.env")
+    )
 
-    for match in guarded:
-        access = match.group("access")
-        if _has_env_first_prefix(source, match.start(), access):
-            continue
-        replacements.append(
-            (
-                match.start(),
-                match.end(),
-                "((typeof $env !== 'undefined' && $env"
-                + access
-                + ") || (typeof process !== 'undefined' && process.env"
-                + access
-                + "))",
-            )
+
+_SECRET_CODE_ENV_NAMES = {
+    "GEMINI_API_KEY",
+    "GEMINI_API_KEY_SECONDARY",
+    "GLPI_APP_TOKEN",
+    "GLPI_AUTH_BASIC",
+    "GLPI_WEBHOOK_KEY",
+    "IA_LOCAL_API_TOKEN",
+    "TEST_AUTO_REVIEW_TOKEN",
+}
+
+_PUBLIC_CODE_CONSTANTS = {
+    "DEDUP_CANDIDATE_LIMIT": "20",
+    "DEDUP_LOCAL_TOP_K": "20",
+    "DEDUP_NEGATIVE_THRESHOLD": "0.22",
+    "DEDUP_POSITIVE_THRESHOLD": "0.78",
+    "DEMO_EQUIPE_DISPONIVEL": "true",
+    "FISCAL_CONFIRMATION_BASE_URL": "http://localhost:5678/webhook/fiscal-confirmacao-v9",
+    "IA_CONFIANCA_MINIMA": "0.65",
+    "IA_OBRA_CONFIANCA_MINIMA": "0.90",
+    "WF01_GLPI_CHUNK_SIZE": "10",
+}
+
+
+def _map_strings(value, transform):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            value[key] = _map_strings(item, transform)
+        return value
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            value[index] = _map_strings(item, transform)
+        return value
+    return transform(value) if isinstance(value, str) else value
+
+
+def _harden_runtime_node(node):
+    """Apply the runtime isolation contract after legacy normalization."""
+    node_type = str(node.get("type", ""))
+    parameters = node.get("parameters")
+    if not isinstance(parameters, dict):
+        return node
+
+    is_code = node_type == "n8n-nodes-base.code"
+
+    def transform(source: str) -> str:
+        # GLPI is reached through an internal credential-injecting proxy. The
+        # URL is configuration, not a secret, and is intentionally immutable
+        # in the published workflow.
+        source = source.replace(
+            "process.env.GLPI_API_URL",
+            "'http://glpi-credential-proxy:8080/apirest.php'",
         )
-
-    for match in _PROCESS_ENV_DIRECT_RE.finditer(source):
-        if any(start <= match.start() < end for start, end in guarded_spans):
-            continue
-        access = match.group("access")
-        replacements.append(
-            (
-                match.start(),
-                match.end(),
-                "((typeof $env !== 'undefined' && $env"
-                + access
-                + ") || (typeof process !== 'undefined' && process.env"
-                + access
-                + "))",
+        if is_code:
+            # O prompt recebe o limiar congelado, sem expressão de ambiente.
+            source = source.replace(
+                "{{ Number(process.env.IA_CONFIANCA_MINIMA || 0.65) }}",
+                "0.65",
+            ).replace(
+                "{{ Number($env.IA_CONFIANCA_MINIMA || 0.65) }}",
+                "0.65",
             )
-        )
+            for name in _SECRET_CODE_ENV_NAMES:
+                source = source.replace(f"process.env.{name}", "undefined")
+            for name, constant in _PUBLIC_CODE_CONSTANTS.items():
+                source = source.replace(
+                    f"process.env.{name}",
+                    json.dumps(constant, ensure_ascii=False),
+                )
+            source = source.replace("process.env[name]", "undefined")
+            # Chamadas diretas ao GLPI passam pelo proxy que injeta o App-Token.
+            # O Code node conserva apenas o Session-Token efêmero.
+            source = re.sub(
+                r"const appToken = .*?;\n",
+                "const appToken = '';\n",
+                source,
+            )
+            source = source.replace("'App-Token': appToken, ", "")
+            return source
+        # Expressions outside Code nodes run in the main process, where env
+        # access is blocked. Undefined preserves each expression's explicit,
+        # public fallback without exposing process configuration.
+        source = re.sub(r"process\.env\.[A-Z][A-Z0-9_]*", "undefined", source)
+        return source.replace("process.env[name]", "undefined")
 
-    normalized = source
-    for start, end, replacement in sorted(replacements, reverse=True):
-        normalized = normalized[:start] + replacement + normalized[end:]
-    return normalized
+    _map_strings(parameters, transform)
+
+    if node_type == "n8n-nodes-base.httpRequest":
+        url = str(parameters.get("url", ""))
+        if "glpi-credential-proxy" in url:
+            header_parameters = parameters.get("headerParameters", {}).get("parameters", [])
+            parameters.setdefault("headerParameters", {})["parameters"] = [
+                row
+                for row in header_parameters
+                if str(row.get("name", "")).lower() not in {"app-token", "authorization"}
+            ]
+    return node
 
 
 def _required_process_env_expr(name):
@@ -123,7 +188,7 @@ def sanitize_workflow_secrets(value):
     if isinstance(value, dict):
         for key, item in value.items():
             value[key] = sanitize_workflow_secrets(item)
-        return value
+        return _harden_runtime_node(value) if "type" in value else value
     if isinstance(value, list):
         for index, item in enumerate(value):
             value[index] = sanitize_workflow_secrets(item)

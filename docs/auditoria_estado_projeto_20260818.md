@@ -1,5 +1,13 @@
 # Auditoria de Estado do Projeto (18/08/2026)
 
+> [!WARNING]
+> **Snapshot histórico, superado pela auditoria de 26/08/2026.** A seleção
+> citada neste documento não sustenta ranking atual: derivados de poucas
+> famílias-fonte não ficaram integralmente no mesmo grupo. Toda classificação
+> permanece sintética e a deduplicação antiga é subdimensionada. Use
+> `auditoria_critica_completa_2026-08-26.md` e
+> `resposta_professor_2026-08-26.md` como estado canônico.
+
 Este documento reflete o estado atual da infraestrutura, workflows, banco de dados e experimentos científicos do projeto de automação de tickets GLPI.
 
 ## 1. Estado da Infraestrutura

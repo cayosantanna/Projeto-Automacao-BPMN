@@ -1,5 +1,14 @@
 # Relatorio de verificacao dos contratos V9
 
+> **Atualização de 26/08/2026.** Após a correção final do WF06, a suíte
+> hermética combinada aprovou 316 testes e 114 subtestes, a validação estática
+> passou, três smokes live seguros passaram e o E2E sintético
+> `VALIDACAO-WF06-E2E-20260826T223056234436Z` percorreu WF06→WF02→WF03 com
+> duas reservas/decisões/tentativas, DLQ zero, paridade, cleanup e restauração
+> completos. A execução manual n8n 52143 também terminou com sucesso. Consulte
+> `../../../docs/TEST_REPORT.md`. A evidência continua técnica e não
+> confirmatória.
+
 Data da última reexecução: 2026-08-17, America/Sao_Paulo.
 
 ## Conclusao

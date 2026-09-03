@@ -74,8 +74,8 @@ def postgres_credential():
             "host": os.getenv("POSTGRES_HOST", "glpi-dedup-db"),
             "port": port,
             "database": required_env("POSTGRES_DB"),
-            "user": required_env("POSTGRES_USER"),
-            "password": required_env("POSTGRES_PASSWORD"),
+            "user": required_env("POSTGRES_RUNTIME_USER"),
+            "password": required_env("POSTGRES_RUNTIME_PASSWORD"),
             "ssl": "disable",
         },
     }

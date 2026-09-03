@@ -52,6 +52,7 @@ LOCAL_RESULTS_FILENAME = "local_only_predictions.jsonl"
 LOCAL_SUMMARY_FILENAME = "local_only_summary.json"
 DERIVED_PAIRED_SUMMARY_FILENAME = "paired_summary_metrics_v1.2.json"
 DERIVED_LOCAL_SUMMARY_FILENAME = "local_only_summary_metrics_v1.2.json"
+GEMINI_PROXY_PREFLIGHT_FILENAME = "gemini_proxy_preflight.json"
 PLAN_VERSION = "paired-local-gemini-v1.2.0"
 LOCAL_PLAN_VERSION = "local-only-pipeline-v1.0.0"
 PROMPT_VERSION = "campus-maintenance-paired-v1.0.0"
@@ -469,6 +470,8 @@ def validate_reserved_dataset(
         "human_label_gate": (manifest.get("validation") or {}).get("human_label_gate"),
         "scientific_result": bool(manifest.get("scientific_result")),
         "confirmatory_eligible": bool(manifest.get("confirmatory_eligible")),
+        "development_only": False,
+        "evidence_basis": "RESERVED_LABELS",
         "pilot_only": bool(manifest.get("pilot_only")),
         "labels_exposed": bool(manifest.get("labels_exposed")),
         "rows": len(rows),
@@ -528,6 +531,13 @@ def validate_local_only_dataset(
         "synthetic": manifest.get("synthetic"),
         "pilot_only": manifest.get("pilot_only"),
         "confirmatory_eligible": bool(manifest.get("confirmatory_eligible")),
+        "development_only": split == "DESENVOLVIMENTO",
+        "scientific_result": False,
+        "evidence_basis": (
+            "SYNTHETIC_PROXY_LABELS"
+            if split == "DESENVOLVIMENTO"
+            else "RESERVED_PRELIMINARY_LABELS"
+        ),
         "rows": len(rows),
         "roles": dict(sorted(roles.items())),
     }
@@ -961,6 +971,94 @@ def preflight_budget(
     }
 
 
+def build_gemini_proxy_preflight(
+    *,
+    dataset: Path,
+    dataset_manifest: Path,
+    dataset_audit: dict[str, Any],
+    local_model_manifest: Path,
+    local_candidate: dict[str, Any],
+    units: Sequence[dict[str, Any]],
+    gemini_model: str,
+    gemini_key_env: str,
+    local_token_env: str,
+) -> dict[str, Any]:
+    """Preflight offline: não lê segredos, não presume cota e não chama APIs."""
+
+    if dataset_audit.get("split") != "DESENVOLVIMENTO":
+        raise BenchmarkGuardError(
+            "preflight proxy exige corpus DESENVOLVIMENTO explicitamente não confirmatório"
+        )
+    requirements = budget_requirements(units)
+    key_present = bool(os.environ.get(gemini_key_env, ""))
+    local_token_present = bool(os.environ.get(local_token_env, ""))
+    blockers = [
+        "ACTIVE_RPM_TPM_RPD_NOT_VERIFIED_IN_AI_STUDIO",
+        "BILLING_TIER_NOT_VERIFIED",
+        "EXCLUSIVE_PROJECT_QUOTA_WINDOW_NOT_CONFIRMED",
+        "REMOTE_EXECUTION_NOT_AUTHORIZED",
+    ]
+    if not key_present:
+        blockers.append("GEMINI_CREDENTIAL_ENV_ABSENT")
+    if not local_token_present:
+        blockers.append("LOCAL_API_CREDENTIAL_ENV_ABSENT")
+    return {
+        "schema_version": "gemini-proxy-preflight-v1",
+        "status": "BLOCKED_REMOTE_EXECUTION_PREFLIGHT_ONLY",
+        "scientific_result": False,
+        "development_only": True,
+        "confirmatory_eligible": False,
+        "evidence_basis": "SYNTHETIC_PROXY_LABELS",
+        "remote_calls_executed": 0,
+        "local_calls_executed": 0,
+        "secrets_read": False,
+        "secret_values_recorded": False,
+        "dataset": {
+            "path": str(dataset.resolve()),
+            "sha256": dataset_audit["dataset_sha256"],
+            "manifest_path": str(dataset_manifest.resolve()),
+            "manifest_sha256": dataset_audit["manifest_sha256"],
+            "split": dataset_audit["split"],
+            "synthetic": dataset_audit.get("synthetic"),
+        },
+        "candidate": {
+            "manifest_path": str(local_model_manifest.resolve()),
+            "manifest_sha256": sha256_file(local_model_manifest),
+            "model_version": local_candidate.get("model_version"),
+        },
+        "planned_comparison": {
+            "local_provider": LOCAL_PROVIDER,
+            "remote_provider": REMOTE_PROVIDER,
+            "remote_model": gemini_model,
+            "paired_units": len(units),
+            "unit_contract_sha256": canonical_sha256(list(units)),
+            "gold_semantics": "PROXY_LABELS_NOT_INSTITUTIONAL_GROUND_TRUTH",
+        },
+        "minimum_remote_requirements": requirements,
+        "credential_presence_only": {
+            "gemini_env_name": gemini_key_env,
+            "gemini_present": key_present,
+            "local_env_name": local_token_env,
+            "local_present": local_token_present,
+        },
+        "live_quota": {
+            "verified": False,
+            "rpm": None,
+            "tpm": None,
+            "rpd": None,
+            "billing_tier_verified": False,
+            "exclusive_window_confirmed": False,
+        },
+        "execution_allowed": False,
+        "blockers": blockers,
+        "official_sources": OFFICIAL_SOURCES,
+        "implementation": {
+            "script_sha256": sha256_file(Path(__file__)),
+            "python": sys.version.split()[0],
+        },
+    }
+
+
 def build_plan(
     *,
     dataset: Path,
@@ -987,6 +1085,14 @@ def build_plan(
     gold_status = Counter(str(unit.get("gold_status")) for unit in units)
     manifest = {
         "schema_version": "1.0.0",
+        "scientific_result": False,
+        "development_only": dataset_audit.get("split") == "DESENVOLVIMENTO",
+        "confirmatory_eligible": False,
+        "evidence_basis": (
+            "SYNTHETIC_PROXY_LABELS"
+            if dataset_audit.get("split") == "DESENVOLVIMENTO"
+            else "RESERVED_PRELIMINARY_LABELS"
+        ),
         "plan_version": PLAN_VERSION,
         "prompt_version": PROMPT_VERSION,
         "status": "FROZEN_DRY_RUN_PLAN",
@@ -1160,6 +1266,14 @@ def build_local_only_plan(
     core_counts = Counter(str(unit.get("scenario_id") or "") for unit in units)
     manifest = {
         "schema_version": "1.0.0",
+        "scientific_result": False,
+        "development_only": dataset_audit.get("split") == "DESENVOLVIMENTO",
+        "confirmatory_eligible": False,
+        "evidence_basis": (
+            "SYNTHETIC_PROXY_LABELS"
+            if dataset_audit.get("split") == "DESENVOLVIMENTO"
+            else "RESERVED_PRELIMINARY_LABELS"
+        ),
         "plan_version": LOCAL_PLAN_VERSION,
         "status": "FROZEN_LOCAL_ONLY_DRY_RUN_PLAN",
         "dry_run_default": True,
@@ -2715,6 +2829,13 @@ def summarize(
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "status": comparison_status,
         "scientific_result": False,
+        "development_only": descriptive_pilot,
+        "confirmatory_eligible": False,
+        "evidence_basis": (
+            "SYNTHETIC_PROXY_LABELS"
+            if descriptive_pilot
+            else "RESERVED_PRELIMINARY_LABELS"
+        ),
         "confirmatory_claim_allowed": False,
         "plan_manifest_payload_sha256": plan["manifest_payload_sha256"],
         "records": len(records),
@@ -2890,6 +3011,9 @@ def summarize_local_only(
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "status": "LOCAL_ONLY_ENGINEERING_RESULTS_NON_CONFIRMATORY",
         "scientific_result": False,
+        "development_only": bool(plan.get("development_only")),
+        "confirmatory_eligible": False,
+        "evidence_basis": plan.get("evidence_basis"),
         "confirmatory_claim_allowed": False,
         "plan_manifest_payload_sha256": plan["manifest_payload_sha256"],
         "records": len(local_records),

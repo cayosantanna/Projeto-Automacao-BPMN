@@ -12,7 +12,7 @@ REGRAS:
 - Divisória interna simples é DEMO; parede estrutural/ampliação com fundação é OBRA.
 - Infraestrutura física de rede pode ser DEMO; configuração de software/rede lógica é TRIAGEM_MANUAL.
 - Se não houver informação suficiente para decidir executor ou escopo, use TRIAGEM_MANUAL.
-- Se a confiança for menor que {{ Number($env.IA_CONFIANCA_MINIMA || 0.65) }}, use TRIAGEM_MANUAL.
+- Se a confiança for menor que 0.65, use TRIAGEM_MANUAL.
 - Disponibilidade da equipe DEMO é uma variável operacional externa. Não a deduza do texto e não altere a classe por esse motivo.
 - As quatro probabilidades são obrigatórias, devem estar entre 0 e 1 e somar 1.
 

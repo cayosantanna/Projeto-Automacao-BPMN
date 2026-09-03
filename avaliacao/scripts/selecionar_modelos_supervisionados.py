@@ -66,6 +66,7 @@ from avaliacao.scripts import treinar_modelo_local as training  # noqa: E402
 SCHEMA = "projeto-ic-selecao-supervisionada-resultados-v1"
 CLASS_LABELS = list(training.CLASS_LABELS)
 DEDUP_LABELS = ["NAO_DUPLICADO", "DUPLICADO"]
+ALL_TASKS = ("classification", "deduplication")
 STRUCTURED_PAIR_FEATURES = [
     "location_equal",
     "category_equal",
@@ -133,14 +134,31 @@ def validate_protocol_config(config: dict[str, Any]) -> None:
         raise SelectionGuardError("Schema do protocolo de seleção inválido")
     if not config.get("development_only"):
         raise SelectionGuardError("Seleção deve permanecer development_only")
+    protocol_version = str(config.get("protocol_version", "") or "")
+    try:
+        protocol_major = int(protocol_version.split(".", 1)[0])
+    except ValueError as exc:
+        raise SelectionGuardError("protocol_version inválida") from exc
     dataset = config.get("dataset", {})
-    if dataset.get("classification_group_field") != "narrative_core_sha256":
+    expected_group_field = (
+        "source_dependency_group_sha256"
+        if protocol_major >= 2
+        else "narrative_core_sha256"
+    )
+    expected_dedup_group_field = (
+        "source_dependency_group_sha256"
+        if protocol_major >= 2
+        else "episode_id"
+    )
+    if dataset.get("classification_group_field") != expected_group_field:
         raise SelectionGuardError(
-            "Agrupamento de classificação deve usar narrative_core_sha256"
+            "Agrupamento de classificação incompatível com a versão do protocolo: "
+            f"esperado {expected_group_field}"
         )
-    if dataset.get("deduplication_group_field") != "episode_id":
+    if dataset.get("deduplication_group_field") != expected_dedup_group_field:
         raise SelectionGuardError(
-            "Agrupamento de deduplicação deve usar episode_id"
+            "Agrupamento de deduplicação incompatível com a versão do protocolo: "
+            f"esperado {expected_dedup_group_field}"
         )
     representations = config.get("representations", {})
     expected_representations = {
@@ -174,6 +192,14 @@ def validate_protocol_config(config: dict[str, Any]) -> None:
         raise SelectionGuardError(
             "MLP deve desativar early_stopping para preservar grupos"
         )
+    execution_tasks = config.get("execution_tasks", list(ALL_TASKS))
+    if (
+        not isinstance(execution_tasks, list)
+        or not execution_tasks
+        or len(set(execution_tasks)) != len(execution_tasks)
+        or set(execution_tasks) - set(ALL_TASKS)
+    ):
+        raise SelectionGuardError("Escopo execution_tasks inválido")
     cv = config.get("cross_validation", {})
     calibration_methods = {
         item.get("calibration") for item in config.get("classifiers", [])
@@ -370,9 +396,21 @@ def _json_default(value: Any) -> Any:
 
 
 def write_json(path: Path, value: Any) -> None:
+    def stamp(item: Any) -> Any:
+        if not isinstance(item, dict):
+            return item
+        stamped = dict(item)
+        stamped.setdefault("scientific_result", False)
+        stamped.setdefault("development_only", True)
+        stamped.setdefault("confirmatory_eligible", False)
+        stamped.setdefault("evidence_basis", "SYNTHETIC_PROXY_LABELS")
+        return stamped
+
+    rendered_value = [stamp(item) for item in value] if isinstance(value, list) else stamp(value)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2, default=_json_default) + "\n",
+        json.dumps(rendered_value, ensure_ascii=False, indent=2, default=_json_default)
+        + "\n",
         encoding="utf-8",
     )
 
@@ -382,6 +420,16 @@ def write_csv(path: Path, rows: Sequence[dict[str, Any]]) -> None:
     if not rows:
         path.write_text("", encoding="utf-8")
         return
+    rows = [
+        {
+            **row,
+            "scientific_result": False,
+            "development_only": True,
+            "confirmatory_eligible": False,
+            "evidence_basis": "SYNTHETIC_PROXY_LABELS",
+        }
+        for row in rows
+    ]
     fields: list[str] = []
     seen: set[str] = set()
     for row in rows:
@@ -623,6 +671,72 @@ def fit_calibration_split(
         "group_overlap": 0,
         "balance_score": best[0],
     }
+
+
+def validate_task_split_feasibility(
+    *,
+    task: str,
+    labels: Sequence[int],
+    groups: Sequence[str],
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Executa todas as divisões exigidas antes de qualquer ajuste caro."""
+    cv = config["cross_validation"]
+    outer_splits = safe_stratified_group_splits(
+        labels,
+        groups,
+        n_splits=int(cv["outer_folds"]),
+        seed=int(cv["outer_seed"]),
+        context=f"preflight/{task}/outer",
+    )
+    audit: list[dict[str, Any]] = []
+    for fold, (outer_train, outer_test) in enumerate(outer_splits):
+        fit_index, calibration_index, split_audit = fit_calibration_split(
+            outer_train,
+            labels,
+            groups,
+            fraction=float(cv["calibration_fraction"]),
+            seed=int(cv["outer_seed"]) + 1000 * (fold + 1),
+            attempts=int(cv["calibration_search_attempts"]),
+            context=f"preflight/{task}/outer-{fold}",
+            min_fit_groups_per_class=int(cv["fit_min_groups_per_class"]),
+            min_calibration_groups_per_class=int(
+                cv["calibration_min_groups_per_class"]
+            ),
+        )
+        safe_stratified_group_splits(
+            np.asarray(labels)[fit_index],
+            np.asarray(groups, dtype=object)[fit_index],
+            n_splits=int(cv["inner_folds"]),
+            seed=int(cv["outer_seed"]) + 10000 + fold,
+            context=f"preflight/{task}/inner-{fold}",
+        )
+        safe_stratified_group_splits(
+            np.asarray(labels)[calibration_index],
+            np.asarray(groups, dtype=object)[calibration_index],
+            n_splits=int(cv["calibration_oof_folds"]),
+            seed=int(cv["outer_seed"]) + 20000 + fold,
+            context=f"preflight/{task}/calibration-{fold}",
+            min_train_groups_per_class=int(
+                cv["calibration_fold_min_groups_per_class"]
+            ),
+            min_test_groups_per_class=int(
+                cv["calibration_fold_min_groups_per_class"]
+            ),
+        )
+        audit.append(
+            {
+                "fold": fold,
+                "outer_train_groups": len(
+                    set(np.asarray(groups, dtype=object)[outer_train])
+                ),
+                "outer_test_groups": len(
+                    set(np.asarray(groups, dtype=object)[outer_test])
+                ),
+                **split_audit,
+            }
+        )
+    return audit
 
 
 def expected_calibration_error(
@@ -2653,10 +2767,10 @@ def paired_group_rows(
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     by_id = {result["combination_id"]: result for result in results}
-    for task in ("classification", "deduplication"):
+    for task, task_comparisons in comparisons.items():
         task_rows: list[dict[str, Any]] = []
         p_values: list[float] = []
-        for comparison in comparisons[task]:
+        for comparison in task_comparisons:
             baseline = by_id.get(comparison["baseline"])
             result = by_id.get(comparison["candidate"])
             if (
@@ -2875,7 +2989,9 @@ def paired_objective_rows(
         "decision_coverage": "higher",
         "full_automation_coverage": "higher",
     }
-    for task_offset, task in enumerate(("classification", "deduplication")):
+    task_offsets = {"classification": 0, "deduplication": 1}
+    for task in baseline_ids:
+        task_offset = task_offsets[task]
         baseline = by_id.get(baseline_ids[task])
         if baseline is None or baseline["status"] != "COMPLETED_DEVELOPMENT_OOF":
             continue
@@ -3795,6 +3911,7 @@ def make_report(
     failed: Sequence[dict[str, Any]],
     xai: Sequence[dict[str, Any]],
     performance: Sequence[dict[str, Any]],
+    selected_tasks: Sequence[str] = ALL_TASKS,
 ) -> None:
     def report_percent(value: Any) -> str:
         return "n/a" if value is None or value == "" else f"{float(value):.2%}"
@@ -3810,9 +3927,12 @@ def make_report(
         f"- dataset: `{dataset_info['path']}`;",
         f"- SHA-256: `{dataset_info['sha256']}`;",
         f"- registros: {dataset_info['records']};",
-        "- classificação agrupada por `narrative_core_sha256`;",
-        "- deduplicação agrupada por `episode_id`;",
-        "- cinco dobras externas; TF-IDF, modelo e calibração ajustados sem usar a dobra externa;",
+        "- classificação agrupada por "
+        f"`{dataset_info['classification_group_field']}`;",
+        "- deduplicação agrupada por "
+        f"`{dataset_info['deduplication_group_field']}`;",
+        "- dobras externas agrupadas; TF-IDF, modelo e calibração ajustados sem usar a dobra externa;",
+        f"- tarefas executadas: {', '.join(selected_tasks)};",
         "- `corpus_v3_teste`, primary33 e datasets V2 não foram usados.",
         "",
         "## Recuperação semântica",
@@ -3832,6 +3952,8 @@ def make_report(
         ),
         ("deduplication", "Deduplicação"),
     ):
+        if task not in selected_tasks:
+            continue
         lines.extend(["", f"## {title}", ""])
         task_rows = [row for row in ranking_rows if row["task"] == task][:10]
         if task == "classification":
@@ -3977,7 +4099,7 @@ def make_report(
             "- os rótulos são sintéticos e não representam prevalência real;",
             "- os intervalos agrupam variações, mas não substituem holdout institucional;",
             "- a escolha é válida apenas como seleção de desenvolvimento;",
-            "- o vencedor não deve substituir o bundle operacional antes do congelamento e do teste confirmatório;",
+            "- nenhum vencedor ou candidato provisório deve substituir o bundle operacional antes do congelamento e do teste confirmatório;",
             "- ausência de diferença significativa não demonstra equivalência.",
             "",
         ]
@@ -3985,6 +4107,14 @@ def make_report(
     (output_dir / "RELATORIO.md").write_text(
         "\n".join(lines), encoding="utf-8"
     )
+
+
+DEFAULT_CONFIG = (
+    PROJECT_ROOT
+    / "avaliacao"
+    / "config"
+    / "selecao_modelos_supervisionados_v2.json"
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -3997,10 +4127,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=Path,
-        default=PROJECT_ROOT
-        / "avaliacao"
-        / "config"
-        / "selecao_modelos_supervisionados_v1.json",
+        default=DEFAULT_CONFIG,
     )
     parser.add_argument("--saida", type=Path, required=True)
     parser.add_argument("--resume", action="store_true")
@@ -4040,6 +4167,7 @@ def main() -> int:
     config_path = args.config.resolve()
     config = json.loads(config_path.read_text(encoding="utf-8"))
     validate_protocol_config(config)
+    selected_tasks = tuple(config.get("execution_tasks", list(ALL_TASKS)))
     protocol_sha256 = sha256_file(config_path)
     output_dir = args.saida.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -4092,6 +4220,7 @@ def main() -> int:
         "sha256": dataset_sha256,
         "records": len(cases),
         "classification_model_records": len(class_cases),
+        "classification_group_field": classification_group_field,
         "classification_groups": len(
             {
                 str(case[classification_group_field])
@@ -4099,14 +4228,56 @@ def main() -> int:
             }
         ),
         "deduplication_pairs": len(pairs),
+        "deduplication_group_field": deduplication_group_field,
         "deduplication_groups": len(
             {str(pair[0][deduplication_group_field]) for pair in pairs}
         ),
         "source_audit": source_audit,
         "synthetic": True,
         "development_only": True,
+        "execution_tasks": list(selected_tasks),
     }
     write_json(output_dir / "dataset_audit.json", dataset_info)
+
+    tfidf_samples = build_samples(
+        cases,
+        embedding_map=None,
+        classification_group_field=classification_group_field,
+        deduplication_group_field=deduplication_group_field,
+    )
+    feasibility_inputs = {
+        "classification": (tfidf_samples[1], tfidf_samples[2]),
+        "deduplication": (tfidf_samples[4], tfidf_samples[5]),
+    }
+    feasibility: dict[str, Any] = {}
+    try:
+        for task in selected_tasks:
+            feasibility[task] = validate_task_split_feasibility(
+                task=task,
+                labels=feasibility_inputs[task][0],
+                groups=feasibility_inputs[task][1],
+                config=config,
+            )
+    except Exception as exc:
+        write_json(
+            output_dir / "preflight_divisoes.json",
+            {
+                "status": "INFEASIBLE",
+                "execution_tasks": list(selected_tasks),
+                "tasks": feasibility,
+                "failed_task": task,
+                "failure": f"{type(exc).__name__}: {exc}",
+            },
+        )
+        raise
+    write_json(
+        output_dir / "preflight_divisoes.json",
+        {
+            "status": "FEASIBLE",
+            "execution_tasks": list(selected_tasks),
+            "tasks": feasibility,
+        },
+    )
 
     unique_symmetric_texts = list(
         dict.fromkeys(
@@ -4195,12 +4366,6 @@ def main() -> int:
     ]
     representations = args.representacoes or list(config["representations"])
     results: list[dict[str, Any]] = []
-    tfidf_samples = build_samples(
-        cases,
-        embedding_map=None,
-        classification_group_field=classification_group_field,
-        deduplication_group_field=deduplication_group_field,
-    )
     for representation in representations:
         representation_specification = config["representations"][representation]
         if not representation_specification["uses_embedding"]:
@@ -4239,6 +4404,8 @@ def main() -> int:
                     pair_groups,
                 ),
             ):
+                if task not in selected_tasks:
+                    continue
                 if task not in representation_specification["tasks"]:
                     continue
                 for classifier in classifiers:
@@ -4265,7 +4432,7 @@ def main() -> int:
     ranking_rows: list[dict[str, Any]] = []
     winners: dict[str, dict[str, Any] | None] = {}
     provisional_candidates: dict[str, dict[str, Any] | None] = {}
-    for task in ("classification", "deduplication"):
+    for task in selected_tasks:
         ranked, winner, provisional = selection_rank(
             results,
             task=task,
@@ -4285,7 +4452,10 @@ def main() -> int:
         for result in results
         for fold in result.get("folds", [])
     ]
-    paired_comparisons = config["paired_comparisons"]
+    paired_comparisons = {
+        task: config["paired_comparisons"][task]
+        for task in selected_tasks
+    }
     paired_baselines = {
         task: comparisons[0]["baseline"]
         for task, comparisons in paired_comparisons.items()
@@ -4329,7 +4499,7 @@ def main() -> int:
             if result["status"] == "COMPLETED_DEVELOPMENT_OOF"
         }
         finalist_count = int(config["xai"]["finalists_per_task"])
-        for task in ("classification", "deduplication"):
+        for task in selected_tasks:
             ordered_ids = [
                 str(row["combination_id"])
                 for row in ranking_rows
@@ -4409,7 +4579,7 @@ def main() -> int:
             for result in results
             if result["status"] == "COMPLETED_DEVELOPMENT_OOF"
         }
-        for task in ("classification", "deduplication"):
+        for task in selected_tasks:
             candidate = winners.get(task) or provisional_candidates.get(task)
             if candidate is None:
                 top_row = next(
@@ -4505,6 +4675,7 @@ def main() -> int:
         "scientific_result": False,
         "development_only": True,
         "confirmatory_eligible": False,
+        "execution_tasks": list(selected_tasks),
         "dataset": dataset_info,
         "embedding_runtime": embedding_metrics,
         "retrieval": retrieval_summary,
@@ -4529,7 +4700,7 @@ def main() -> int:
         "performance_benchmark_complete": not performance_failed,
         "limitations": [
             "Corpus sintético de desenvolvimento, sem prevalência real.",
-            "Variações agrupadas por núcleo/episódio; n efetivo menor que registros.",
+            "Variações agrupadas por source_dependency_group_sha256; n efetivo menor que registros.",
             "Seleção não confirmatória; holdout permaneceu fechado.",
             "SHAP explica associação no score-base, não causalidade.",
         ],
@@ -4545,6 +4716,7 @@ def main() -> int:
         failed=failed,
         xai=xai_results,
         performance=performance_results,
+        selected_tasks=selected_tasks,
     )
     print(f"Seleção concluída em {output_dir}", flush=True)
     return 0 if not failed and not xai_failed and not performance_failed else 2
