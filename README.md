@@ -4,9 +4,13 @@ Protótipo operacional e plataforma de pesquisa para triagem, deduplicação e
 classificação de chamados de manutenção predial. A arquitetura integra GLPI,
 n8n, PostgreSQL e um serviço local de IA com Granite Embedding 97M.
 
-> Estado em 2026-09-03: o caminho técnico V9 funciona no ambiente local, o E2E
-> sintético final passou, fila/DLQ ficaram zeradas e uma homologação isolada
-> com nove serviços está saudável. O modelo ainda **não possui validação
+> Atualização em 2026-09-14: veja a
+> [confirmação final da homologação](docs/homologacao_v9_confirmacao_2026-09-14.md).
+> A captura atômica final registrou `ERRO_IA=0`, fila ativa `=0` e DLQ aberta
+> `=0`; a validação estática V9 e 53 testes operacionais localizados passaram. As três
+> janelas técnicas intradiárias locais/sintéticas foram concluídas, porém não
+> produzem disponibilidade longitudinal, correção semântica nem aprovação
+> institucional. O modelo **não possui validação
 > confirmatória institucional**. `scientific_ready=false` e
 > `confirmatory_claim_allowed=false` são estados corretos, não falhas a ocultar.
 > Em 01/09/2026 foi decidido não realizar verificação humana nem revisão em
@@ -39,13 +43,13 @@ permanecem apenas como trilha histórica em
 [`INVALIDADO.md`](avaliacao/resultados/selecao-supervisionada-v2/INVALIDADO.md).
 O protocolo 2.1 corrigiu o agrupamento por
 `source_dependency_group_sha256` e foi executado novamente. As 35 configurações
-de classificação terminaram e passaram em validação independente no escopo da
+de classificação terminaram e passaram em recomputação automatizada no escopo da
 tarefa; as 55 de deduplicação foram bloqueadas porque seis grupos por classe
 não comportam o desenho de ajuste+calibração. O candidato classificatório
 provisório foi E5 + híbrido + SVM linear, com status `UNDERPOWERED`; isso não
 autoriza trocar o bundle operacional.
 
-## O que está comprovado hoje
+## Evidências anteriores e seus limites
 
 - os seis workflows V9 são gerados a partir de builders, têm snapshots
   SHA-256, passaram na validação estática e foram publicados com paridade de
@@ -64,11 +68,19 @@ autoriza trocar o bundle operacional.
   experiências encerradas;
 - segredos, bancos, backups, binários e caches locais foram retirados do
   versionamento.
-- três partições aceleradas por proxy foram concluídas sem vazamento de grupos;
-  separadamente, o coletor acumulou pelo menos quatro janelas temporais
-  intradiárias no relatório versionado (seis no estado local de 03/09). Todas
-  falharam os SLOs propostos e as mais recentes acionaram `STOP` de drift; isso
-  valida o mecanismo de detecção, não disponibilidade longitudinal;
+- as três janelas corrigidas de quatro horas concluídas em 11/09 tiveram ao
+  menos 180 observações e cobertura de reconciliação por intervalo, mas zero
+  decisões únicas em cada janela. A disponibilidade observada é fração de
+  probes, não uptime contínuo; drift e métricas dependentes de decisões seguem
+  `INSUFFICIENT_DATA`. A primeira janela falhou o SLO técnico proposto apenas
+  pela idade do backup (206,05 h > 168 h); as outras duas ficaram
+  `INSUFFICIENT_DATA`. Esses limiares não são política institucional aprovada;
+- a interpretação publicada em 03/09 sobre quatro/seis janelas temporais foi
+  invalidada depois: o coletor anterior à versão 1.1 reutilizava métricas de 30
+  dias e snapshots históricos em janelas de quatro horas. Esses `FAIL`/`STOP`
+  não estimam p95, erro ou drift da janela. O coletor corrigido mede intervalos
+  não sobrepostos; a rodada concluída em 11/09 é evidência técnica local,
+  não um SLO temporal de produção;
 - a homologação sintética separada usa portas, redes, volumes e segredos
   próprios, sem copiar chamados reais.
 - a varredura final encontrou zero segredo na árvore candidata e 15 achados no
@@ -142,6 +154,8 @@ O E2E mutante exige confirmação explícita e um manifesto congelado; consulte
 
 ## Documentos canônicos
 
+- [Continuação da auditoria e estado atual de 2026-09-10](docs/auditoria_continuacao_2026-09-10.md)
+- [Política de organização e retenção](docs/politica_organizacao_retencao.md)
 - [Auditoria crítica completa de 2026-09-03](docs/auditoria_critica_completa_2026-09-03.md)
 - [Auditoria crítica completa de 2026-09-02](docs/auditoria_critica_completa_2026-09-02.md)
 - [Auditoria crítica completa de 2026-09-01](docs/auditoria_critica_completa_2026-09-01.md)

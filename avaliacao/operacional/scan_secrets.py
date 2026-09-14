@@ -44,6 +44,13 @@ KNOWN_SAFE_EXAMPLE_FINGERPRINTS = {
 ASSIGNMENT = re.compile(
     r"(?m)^\s*(?:export\s+)?([A-Z][A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|API_KEY|AUTH_BASIC|TOKEN)[A-Z0-9_]*)\s*[:=]\s*['\"]?([^\s'\"#]{12,})"
 )
+DIRECT_STRUCTURED_CREDENTIAL = re.compile(
+    r"(?i)[\"']?(APP[-_]?TOKEN|X[-_]?WEBHOOK[-_]?KEY|AUTHORIZATION)[\"']?\s*[:=]\s*[\"']([^\"']{12,})[\"']"
+)
+NAMED_HEADER_CREDENTIAL = re.compile(
+    r"(?is)[\"']name[\"']\s*:\s*[\"'](APP[-_]?TOKEN|X[-_]?WEBHOOK[-_]?KEY|AUTHORIZATION)[\"']"
+    r".{0,160}?[\"']value[\"']\s*:\s*[\"']([^\"']{12,})[\"']"
+)
 
 
 def _run(command: list[str], *, binary: bool = False, input_data: bytes | None = None) -> subprocess.CompletedProcess:
@@ -71,11 +78,14 @@ def _is_placeholder(value: str) -> bool:
         or "example" in lowered
         or "placeholder" in lowered
         or lowered.startswith("${")
+        or lowered.startswith("={{")
         or lowered.startswith("{{")
         or lowered.startswith("$")
         or lowered.startswith("%")
         or lowered.startswith("process.env")
         or lowered.startswith("os.getenv")
+        or "getenv(" in lowered
+        or "$env." in lowered
         or lowered.startswith("test")
         or lowered.startswith("dummy")
         or lowered.startswith("validacao")
@@ -122,6 +132,25 @@ def _scan_text(text: str, path: str, scope: str, blob: str | None = None) -> lis
                 "blob": blob,
             }
         )
+    for pattern in (DIRECT_STRUCTURED_CREDENTIAL, NAMED_HEADER_CREDENTIAL):
+        for match in pattern.finditer(text):
+            name, value = match.groups()
+            normalized_path = path.replace("\\", "/").lower()
+            if _is_placeholder(value) or "/tests/" in f"/{normalized_path}" or normalized_path.startswith("tests/"):
+                continue
+            if Path(normalized_path).name.startswith("test_"):
+                continue
+            findings.append(
+                {
+                    "scope": scope,
+                    "path": path,
+                    "rule": "structured_credential_literal",
+                    "variable": name.upper().replace("_", "-"),
+                    "line": text.count("\n", 0, match.start()) + 1,
+                    "fingerprint": _fingerprint(value),
+                    "blob": blob,
+                }
+            )
     return findings
 
 
@@ -132,14 +161,52 @@ def _candidate_files() -> list[str]:
     return sorted(value.decode("utf-8", errors="surrogateescape") for value in completed.stdout.split(b"\0") if value)
 
 
-def _scan_candidate() -> tuple[list[dict[str, object]], list[str]]:
+def _is_release_surface(relative: str) -> bool:
+    normalized = relative.replace("\\", "/")
+    exact = {
+        "README.md",
+        "requirements.txt",
+        "n8n/docker-compose.yml",
+        "glpi/docker-compose.yml",
+    }
+    prefixes = (
+        ".github/workflows/",
+        "avaliacao/config/",
+        "avaliacao/operacional/",
+        "avaliacao/scripts/",
+        "docs/",
+        "glpi/plugins/n8nwebhook/",
+        "local_ai/app/",
+        "n8n/proxies/",
+        "n8n/workflows/Versão9/",
+        "scripts/",
+    )
+    excluded = (
+        "avaliacao/operacional/tests/",
+        "avaliacao/resultados/",
+        "avaliacao/runtime/",
+        "scripts/tests/",
+    )
+    return normalized in exact or (
+        normalized.startswith(prefixes) and not normalized.startswith(excluded)
+    )
+
+
+def _scan_candidate(*, release_only: bool = False) -> tuple[list[dict[str, object]], list[str]]:
     findings: list[dict[str, object]] = []
     skipped: list[str] = []
     for relative in _candidate_files():
-        path = ROOT / relative
-        if not path.is_file():
+        if release_only and not _is_release_surface(relative):
             continue
-        size = path.stat().st_size
+        path = ROOT / relative
+        try:
+            is_file = path.is_file()
+            size = path.stat().st_size if is_file else 0
+        except OSError:
+            skipped.append(relative)
+            continue
+        if not is_file:
+            continue
         if size > MAX_BYTES:
             try:
                 with path.open("r", encoding="utf-8", errors="ignore") as source:
@@ -151,7 +218,11 @@ def _scan_candidate() -> tuple[list[dict[str, object]], list[str]]:
             except OSError:
                 skipped.append(relative)
             continue
-        content = path.read_bytes()
+        try:
+            content = path.read_bytes()
+        except OSError:
+            skipped.append(relative)
+            continue
         if b"\0" in content[:8192]:
             continue
         findings.extend(_scan_text(content.decode("utf-8", errors="ignore"), relative, "candidate_tree"))
@@ -239,15 +310,16 @@ def _scan_history() -> tuple[list[dict[str, object]], int]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Varredura local de segredos sem imprimir os valores.")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--scope", choices=("release", "candidate", "all"), default="all")
     args = parser.parse_args()
     output = args.output.resolve()
     output.relative_to(ROOT.resolve())
     if output.exists():
         raise RuntimeError(f"Evidência já existe: {output}")
-    candidate, skipped = _scan_candidate()
-    history, history_blobs = _scan_history()
+    candidate, skipped = _scan_candidate(release_only=args.scope == "release")
+    history, history_blobs = _scan_history() if args.scope == "all" else ([], 0)
     result = {
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
         "candidate_tree": {
             "status": "PASS" if not candidate else "FAIL",
             "finding_count": len(candidate),
@@ -255,14 +327,16 @@ def main() -> int:
             "large_text_files_not_content_scanned": skipped,
         },
         "reachable_git_history": {
-            "status": "PASS" if not history else "FAIL",
+            "status": "NOT_RUN" if args.scope != "all" else ("PASS" if not history else "FAIL"),
             "blob_count_scanned": history_blobs,
             "finding_count": len(history),
             "findings": history,
         },
         "secrets_printed": False,
         "scientific_result": False,
-        "requires_rotation_or_history_remediation": bool(history or candidate),
+        "requires_rotation_or_history_remediation": (
+            bool(history or candidate) if args.scope == "all" else None
+        ),
         "interpretation_limit": (
             "Varredura por padrões reduz risco, mas não prova ausência absoluta de segredos. "
             "Arquivos binários e textos acima de 2 MiB não foram lidos como conteúdo."

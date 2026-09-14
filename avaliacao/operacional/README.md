@@ -12,14 +12,23 @@ uma declaração de conformidade do NIST.
 
 ## Estado honesto
 
+A atualização de 09/09 está em
+[`docs/auditoria_critica_completa_2026-09-09.md`](../../docs/auditoria_critica_completa_2026-09-09.md).
+As contagens de janelas legadas não aprovam suas métricas de decisões: a
+reanálise corrigida registra cobertura insuficiente. O proxy do editor foi
+corrigido para preservar a porta externa sem desativar validação de origem.
+
 - `politica_operacional_v1.json` é uma proposta ainda não aprovada; seus
   limiares só se tornam compromisso institucional após aceite e congelamento
   formais.
-- os SLOs são limiares propostos e não aprovados. O relatório versionado de
-  03/09 contém pelo menos quatro janelas temporais intradiárias completas; o
-  estado local chegou a seis. Todas falharam os limiares propostos. As três
-  partições aceleradas e disjuntas por grupo são outra evidência, destinada a
-  testar o mecanismo proxy; nenhuma delas é janela de produção;
+- os SLOs são limiares propostos e não aprovados. A interpretação de 03/09 que
+  tratava quatro/seis blocos como janelas temporais válidas foi invalidada: o
+  coletor anterior à versão 1.1 repetia contexto de 30 dias e snapshots
+  históricos em janelas de quatro horas. Seus p95, taxas de erro e `FAIL`/`STOP`
+  não são medições temporais válidas;
+- as três partições aceleradas e disjuntas por grupo são outra evidência,
+  destinada a testar o mecanismo sobre rótulos-proxy; nenhuma delas é janela de
+  produção;
 - os testes de falha padrão usam servidores efêmeros no loopback e nunca
   desligam GLPI, IA ou PostgreSQL vivos;
 - o restore com `--apply` usa containers aleatórios, `--network none`, nenhuma
@@ -42,8 +51,8 @@ uma declaração de conformidade do NIST.
 |---|---|---|---|
 | GOVERN | Responsabilidade, tolerância e rastreabilidade | política versionada; rótulos de evidência; SLO explicitamente não aprovado; ações fail-closed; plano de rollback | Parcial; responsáveis e aceite institucional pendentes |
 | MAP | Contexto GLPI–n8n–IA–PostgreSQL e impacto de decisões erradas | dependências mapeadas; mutação GLPI bloqueada quando falta uma dependência; limites de interpretação em todo relatório | Parcial; impacto e subgrupos precisam validação institucional |
-| MEASURE | Disponibilidade, latência, fila, DLQ, erros, backup e drift | carga limitada; janelas temporais intradiárias; três partições proxy aceleradas; Jensen–Shannon e PSI; restore do volume n8n; auditoria de privilégios | Mecanismo concluído; SLO proposto falhou e não há validade longitudinal/semântica |
-| MANAGE | Resposta a falha, abstinência e rollback | simulação isolada; E2E sintético com cleanup; decisão automática proibida em falha; STOP de drift; SQL de menor privilégio | Parcial; aprovação operacional e resposta ao STOP pendentes |
+| MEASURE | Disponibilidade, latência, fila, DLQ, erros, backup e drift | carga limitada; coletor intervalar corrigido; três partições proxy aceleradas; Jensen–Shannon e PSI; restore do volume n8n; auditoria de privilégios | Parcial; janelas temporais válidas ainda precisam ser acumuladas e não há validade longitudinal/semântica |
+| MANAGE | Resposta a falha, abstinência e rollback | simulação isolada; E2E sintético com cleanup; decisão automática proibida em falha; diagnóstico de drift; SQL de menor privilégio | Parcial; `STOP` ainda não possui atuação no runtime e a aprovação operacional está pendente |
 
 O framework também trata sistemas de IA como sociotécnicos e recomenda separar
 atores que desenvolvem daqueles que verificam e validam. O projeto decidiu não
@@ -120,17 +129,35 @@ mudança; o login runtime não pode executá-las.
 O coletor local executa a cada minuto em segundo plano. `daemon-status.json`
 informa o estado do processo; `latest.json` contém a coleta atual; e
 `windows.json` acumula janelas. A política longitudinal de 30 dias foi retirada
-do escopo. Em 03/09 havia seis janelas intradiárias completas no estado local;
-todas falharam o SLO proposto, e as mais recentes registraram `STOP` de drift
-por mudança na distribuição de confiança. Separadamente,
-`validate_accelerated_proxy_windows.py` criou três partições por contagem, com
-372/371/371 registros e grupos sem sobreposição. `production_slo_estimated=false`
-e `semantic_correctness_confirmed=false` permanecem obrigatórios.
+do escopo.
 
-Alertas implementados como gates/STOP na política:
+### Errata de integridade das janelas de 03/09
+
+O coletor anterior ao schema 1.1 atribuía a cada janela de quatro horas métricas
+rolantes de 30 dias e snapshots dos 400 registros mais recentes. Assim, a
+quantidade de probes e a duração transcorrida eram reais, mas a cobertura de
+decisões, o p95, a taxa de erro e o drift não pertenciam necessariamente à
+janela. As quatro/seis janelas e seus `FAIL`/`STOP` permanecem como trilha
+histórica, porém não podem ser citados como avaliação temporal válida de SLO.
+
+O schema 1.1 registra intervalo `[start, end)`, decisões únicas e cobertura. Uma
+janela só pode produzir p95/taxa de erro quando houver decisões novas e
+cobertura temporal suficiente; espera p95 de fila permanece
+`INSUFFICIENT_DATA`, pois a fonte disponível guarda apenas percentis por ciclo.
+Contexto rolante legado é preservado e explicitamente separado da evidência da
+janela. Ainda não há, nesta documentação, uma nova série temporal válida que
+autorize aprovar ou reprovar o SLO.
+
+Separadamente, `validate_accelerated_proxy_windows.py` criou três partições por
+contagem, com 372/371/371 registros e grupos sem sobreposição. Elas exercitam o
+mecanismo técnico sobre rótulos-proxy; não são janelas temporais. Os estados
+`production_slo_estimated=false` e `semantic_correctness_confirmed=false`
+permanecem obrigatórios.
+
+Diagnósticos definidos na política:
 
 - imediato: qualquer erro automático crítico ou DLQ aberta;
-- STOP: drift acima do limite, sem retreinamento automático;
+- `STOP`: drift acima do limite, sem retreinamento automático;
 - degradação: p95, fila ou disponibilidade fora do SLO por janela definida;
 - continuidade: restore aprovado com mais de 168 horas;
 - segurança: mudança de role, digest de imagem, workflow ou política.
@@ -140,9 +167,11 @@ Alertas implementados como gates/STOP na política:
 O detector exige ao menos 200 observações na referência e na janela corrente.
 Usa Jensen–Shannon para variáveis categóricas e PSI para histogramas numéricos.
 Snapshots sem variáveis comparáveis retornam `INCOMPATIBLE_SNAPSHOTS`, nunca
-`PASS`. Drift indica mudança de distribuição, não queda comprovada de acurácia;
-`STOP` bloqueia promoção automaticamente; não há revisão humana, retreinamento
-ou promoção automática.
+`PASS`. Drift indica mudança de distribuição, não queda comprovada de acurácia.
+No runtime atual, `automatic_stop_enforced=false` e o escopo é
+`READ_ONLY_DIAGNOSTIC_NO_RUNTIME_ACTUATION`: `STOP` é um diagnóstico/pedido de
+bloqueio, não um atuador. Não há revisão humana, retreinamento ou promoção
+automática.
 
 ## Critérios ainda pendentes
 
@@ -150,6 +179,8 @@ ou promoção automática.
 - aprovar formalmente os limiares, responsáveis e RTO/RPO;
 - promover workflows e credenciais sintéticas para a homologação sem copiar
   tickets reais, caso se deseje E2E também nessa stack;
+- implementar e ensaiar a atuação operacional do `STOP`, caso esse gate deva
+  bloquear o runtime, ou manter sua natureza apenas diagnóstica explicitamente;
 - rotacionar credenciais históricas e decidir separadamente sobre reescrita do
   histórico Git;
 - revisão independente de segurança, privacidade e proteção de dados.

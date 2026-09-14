@@ -2,10 +2,20 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 
 import pytest
 
-from avaliacao.operacional import backup_restore_drill, core, least_privilege, monitor_daemon, validar_operacao
+from avaliacao.operacional import (
+    backup_restore_drill,
+    capture_live_backups,
+    capture_runtime_state,
+    core,
+    least_privilege,
+    monitor_daemon,
+    scan_secrets,
+    validar_operacao,
+)
 from avaliacao.operacional.collector import _backup_restore_age_hours, _single_instance_lock, summarize_windows
 from avaliacao.operacional.core import (
     bounded_load_probe,
@@ -103,6 +113,103 @@ def test_read_only_commands_suppress_windows_console(monkeypatch: pytest.MonkeyP
     assert result == {"returncode": 0, "stdout": "ok", "stderr": ""}
 
 
+def test_live_probe_is_pinned_to_local_docker_desktop(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(core, "project_env", lambda _root: {})
+    monkeypatch.setattr(
+        core,
+        "_http_request",
+        lambda *_args, **_kwargs: {"status": 200, "latency_ms": 1.0, "body": "ok"},
+    )
+
+    def fake_run(command: list[str], timeout_seconds: float = 15.0) -> dict[str, object]:
+        captured["command"] = command
+        captured["timeout_seconds"] = timeout_seconds
+        return {
+            "returncode": 0,
+            "stdout": "\n".join(
+                f"/{name}|running|healthy"
+                for name in ("glpi", "glpi-db", "glpi-dedup-db", "n8n")
+            ),
+            "stderr": "",
+        }
+
+    monkeypatch.setattr(core, "run_command_read_only", fake_run)
+    result = core.collect_live_point_in_time(ROOT)
+
+    assert captured["command"][:3] == ["docker", "--context", "desktop-linux"]
+    assert result["status"] == "PASS"
+    assert result["docker_healthy"] is True
+
+
+def test_live_probe_fails_when_docker_is_unhealthy_despite_http_200(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(core, "project_env", lambda _root: {})
+    monkeypatch.setattr(
+        core,
+        "_http_request",
+        lambda *_args, **_kwargs: {"status": 200, "latency_ms": 1.0, "body": "ok"},
+    )
+    monkeypatch.setattr(
+        core,
+        "run_command_read_only",
+        lambda *_args, **_kwargs: {
+            "returncode": 1,
+            "stdout": "/n8n|running|healthy",
+            "stderr": "missing containers",
+        },
+    )
+
+    result = core.collect_live_point_in_time(ROOT)
+
+    assert result["status"] == "FAIL"
+    assert result["docker_healthy"] is False
+
+
+def test_runtime_state_query_is_pinned_local_and_uses_one_statement_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(command: list[str], **kwargs: object) -> object:
+        captured["command"] = command
+        captured.update(kwargs)
+        return core.subprocess.CompletedProcess(command, 0, "0|0|0\n", "")
+
+    monkeypatch.setattr(capture_runtime_state.subprocess, "run", fake_run)
+    sql = (
+        "SELECT count(*) FILTER (WHERE triagem_status='ERRO_IA'), "
+        "count(*) FILTER (WHERE triagem_status='PENDENTE_FILA_IA'), "
+        "(SELECT count(*) FROM fila_ia_dead_letter WHERE NOT resolvido) "
+        "FROM tickets_processados"
+    )
+    assert capture_runtime_state._query(sql) == ["0|0|0"]
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[:3] == ["docker", "--context", "desktop-linux"]
+    assert sql in command[-1]
+
+
+def test_runtime_state_passes_when_all_three_atomic_counts_are_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output = tmp_path / "runtime.json"
+    monkeypatch.setattr(capture_runtime_state, "ROOT", tmp_path)
+    monkeypatch.setattr(capture_runtime_state, "_query", lambda _sql: ["0|0|0"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["capture_runtime_state.py", "--output", str(output)],
+    )
+
+    assert capture_runtime_state.main() == 0
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["status"] == "PASS"
+    assert (payload["erro_ia"], payload["active_queue"], payload["open_dlq"]) == (0, 0, 0)
+
+
 def test_drift_without_shared_features_cannot_pass() -> None:
     reference = {"sample_size": 200, "categorical": {"a": {"x": 200}}}
     current = {"sample_size": 200, "categorical": {"b": {"x": 200}}}
@@ -142,7 +249,10 @@ def test_monitoring_windows_require_elapsed_time_and_minimum_observations() -> N
 def test_three_intraday_windows_are_technical_not_longitudinal() -> None:
     policy = load_policy(POLICY_PATH)
     observations = []
-    for minute in range(12 * 60 + 1):
+    # Três janelas de quatro horas só fecham depois da defasagem obrigatória
+    # de reconciliação de decisões da terceira janela.
+    reconciliation_minutes = int(policy["monitoring"]["decision_reconciliation_lag_seconds"] / 60)
+    for minute in range(12 * 60 + reconciliation_minutes + 1):
         observations.append(
             {
                 "collected_at": f"2026-09-02T{minute // 60:02d}:{minute % 60:02d}:00Z",
@@ -236,6 +346,46 @@ def test_backup_restore_default_is_plan_only(monkeypatch: pytest.MonkeyPatch) ->
         plan["temporary_target_controls"]["resource_strategy"]
         == "SEQUENTIAL_EPHEMERAL_DATABASES"
     )
+
+
+def test_backup_restore_is_pinned_to_local_docker_desktop() -> None:
+    assert backup_restore_drill.docker_command("ps")[:3] == [
+        "docker",
+        "--context",
+        "desktop-linux",
+    ]
+    source = Path(backup_restore_drill.__file__).read_text(encoding="utf-8")
+    assert '"pg_restore", "--no-owner", "--no-privileges"' in source
+
+
+def test_live_backup_capture_is_dry_run_and_pinned(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    output_dir = tmp_path / "backup"
+    manifest = tmp_path / "manifest.json"
+    assert capture_live_backups.main(
+        ["--output-dir", str(output_dir), "--manifest", str(manifest)]
+    ) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["mode"] == "DRY_RUN"
+    assert plan["daemon_touched"] is False
+    assert plan["live_databases_mutated"] is False
+    assert capture_live_backups.docker_command("ps")[:3] == [
+        "docker",
+        "--context",
+        "desktop-linux",
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "headers: {'App-Token': 'literal-token-value-123456'}",
+        '{"name":"App-Token","value":"literal-token-value-123456"}',
+    ],
+)
+def test_secret_scan_detects_structured_glpi_token_without_echoing(payload: str) -> None:
+    findings = scan_secrets._scan_text(payload, "legacy.json", "candidate_tree")
+    assert any(row["rule"] == "structured_credential_literal" for row in findings)
+    assert "literal-token-value-123456" not in json.dumps(findings)
 
 
 def test_superuser_live_row_is_detected(monkeypatch: pytest.MonkeyPatch) -> None:

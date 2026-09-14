@@ -46,6 +46,7 @@
     "approval_status": "PROPOSTO_NAO_APROVADO",
     "collector_status": "INSTALADO_LOCALMENTE_2026-09-02",
     "collection_interval_seconds": 60,
+    "decision_reconciliation_lag_seconds": 300,
     "retention_days_proposed": 90,
     "required_signals": [
       "component_availability",

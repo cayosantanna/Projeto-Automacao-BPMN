@@ -26,6 +26,11 @@ from avaliacao.operacional.core import (  # noqa: E402
 
 POSTGRES_IMAGE = "postgres:16.13@sha256:71e27bf60b70bded003791b5573f8b808365613f341df20ffcf0c1ed7bc13ddf"
 MARIADB_IMAGE = "mariadb:10.11.16@sha256:8d9046cdb0b0961b3d2119bcb4bea62a185f11944be5968bc42b81d47801902e"
+DOCKER_PREFIX = ["docker", "--context", "desktop-linux"]
+
+
+def docker_command(*args: str) -> list[str]:
+    return [*DOCKER_PREFIX, *args]
 
 
 def latest_mariadb_backup(root: Path = ROOT) -> Path:
@@ -93,9 +98,9 @@ def _wait_mariadb_final(container: str, *, attempts: int = 80) -> None:
     """
 
     for _ in range(attempts):
-        process_one = _run(["docker", "exec", container, "cat", "/proc/1/comm"], timeout=5.0)
+        process_one = _run(docker_command("exec", container, "cat", "/proc/1/comm"), timeout=5.0)
         ping = _run(
-            ["docker", "exec", container, "mariadb-admin", "ping", "-uroot", "--silent"],
+            docker_command("exec", container, "mariadb-admin", "ping", "-uroot", "--silent"),
             timeout=5.0,
         )
         if process_one["returncode"] == 0 and process_one["stdout"].strip() in {
@@ -122,7 +127,7 @@ def _query_counts_postgres(container: str, tables: list[str]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for table in tables:
         command = [
-            "docker", "exec", container, "psql", "-U", "postgres", "-d", "restore_target", "-At",
+            *DOCKER_PREFIX, "exec", container, "psql", "-U", "postgres", "-d", "restore_target", "-At",
             "-c", f'SELECT count(*) FROM public."{table}";',
         ]
         counts[table] = int(_require_ok(_run(command), f"contagem PostgreSQL {table}"))
@@ -133,7 +138,7 @@ def _query_counts_mariadb(container: str, tables: list[str]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for table in tables:
         command = [
-            "docker", "exec", container, "mariadb", "-uroot", "-N", "-B", "glpi_restore",
+            *DOCKER_PREFIX, "exec", container, "mariadb", "-uroot", "-N", "-B", "glpi_restore",
             "-e", f"SELECT COUNT(*) FROM `{table}`;",
         ]
         counts[table] = int(_require_ok(_run(command), f"contagem MariaDB {table}"))
@@ -154,22 +159,25 @@ def execute_drill(postgres_artifact: Path, mariadb_artifact: Path, policy: dict[
 
             _require_ok(
                 _run([
-                    "docker", "run", "--rm", "-d", "--name", pg_name, "--network", "none",
+                    *DOCKER_PREFIX, "run", "--rm", "-d", "--name", pg_name, "--network", "none",
                     "-e", "POSTGRES_HOST_AUTH_METHOD=trust", POSTGRES_IMAGE,
                 ]),
                 "criação do PostgreSQL temporário",
             )
             created.append(pg_name)
-            _wait(["docker", "exec", pg_name, "pg_isready", "-U", "postgres", "-d", "postgres"])
-            _require_ok(_run(["docker", "exec", pg_name, "createdb", "-U", "postgres", "restore_target"]), "createdb")
+            _wait(docker_command("exec", pg_name, "pg_isready", "-U", "postgres", "-d", "postgres"))
+            _require_ok(_run(docker_command("exec", pg_name, "createdb", "-U", "postgres", "restore_target")), "createdb")
             if pg_staged.suffix.lower() == ".dump":
                 restore_pg = _run(
-                    ["docker", "exec", "-i", pg_name, "pg_restore", "-U", "postgres", "-d", "restore_target"],
+                    docker_command(
+                        "exec", "-i", pg_name, "pg_restore", "--no-owner", "--no-privileges",
+                        "-U", "postgres", "-d", "restore_target",
+                    ),
                     stdin_path=pg_staged,
                 )
             else:
                 restore_pg = _run(
-                    ["docker", "exec", "-i", pg_name, "psql", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "restore_target"],
+                    docker_command("exec", "-i", pg_name, "psql", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "restore_target"),
                     stdin_path=pg_staged,
                 )
             _require_ok(restore_pg, "restauração PostgreSQL")
@@ -178,12 +186,12 @@ def execute_drill(postgres_artifact: Path, mariadb_artifact: Path, policy: dict[
             # Não mantenha dois SGBDs efêmeros simultâneos em estações com pouca
             # memória. O alvo PostgreSQL já foi verificado e pode ser removido
             # antes de iniciar o MariaDB, sem tocar os containers vivos.
-            _require_ok(_run(["docker", "rm", "-f", pg_name], timeout=20.0), "remoção do PostgreSQL temporário")
+            _require_ok(_run(docker_command("rm", "-f", pg_name), timeout=20.0), "remoção do PostgreSQL temporário")
             created.remove(pg_name)
 
             _require_ok(
                 _run([
-                    "docker", "run", "--rm", "-d", "--name", maria_name, "--network", "none",
+                    *DOCKER_PREFIX, "run", "--rm", "-d", "--name", maria_name, "--network", "none",
                     "-e", "MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1", MARIADB_IMAGE,
                 ]),
                 "criação do MariaDB temporário",
@@ -191,15 +199,15 @@ def execute_drill(postgres_artifact: Path, mariadb_artifact: Path, policy: dict[
             created.append(maria_name)
             _wait_mariadb_final(maria_name)
             _require_ok(
-                _run(["docker", "exec", maria_name, "mariadb", "-uroot", "-e", "CREATE DATABASE glpi_restore;"]),
+                _run(docker_command("exec", maria_name, "mariadb", "-uroot", "-e", "CREATE DATABASE glpi_restore;")),
                 "criação do banco MariaDB temporário",
             )
             _require_ok(
-                _run(["docker", "cp", str(maria_staged), f"{maria_name}:/tmp/restore.sql"]),
+                _run(docker_command("cp", str(maria_staged), f"{maria_name}:/tmp/restore.sql")),
                 "staging do dump no MariaDB temporário",
             )
             staged_hash_output = _require_ok(
-                _run(["docker", "exec", maria_name, "sha256sum", "/tmp/restore.sql"]),
+                _run(docker_command("exec", maria_name, "sha256sum", "/tmp/restore.sql")),
                 "hash do dump dentro do MariaDB temporário",
             )
             staged_hash = staged_hash_output.split()[0].lower()
@@ -207,7 +215,7 @@ def execute_drill(postgres_artifact: Path, mariadb_artifact: Path, policy: dict[
                 raise RuntimeError("hash do dump divergiu após a cópia para o container")
             restore_maria = _run(
                 [
-                    "docker",
+                    *DOCKER_PREFIX,
                     "exec",
                     maria_name,
                     "mariadb",
@@ -218,7 +226,7 @@ def execute_drill(postgres_artifact: Path, mariadb_artifact: Path, policy: dict[
                 ],
             )
             if restore_maria["returncode"] != 0:
-                logs = _run(["docker", "logs", "--tail", "200", maria_name], timeout=20.0)
+                logs = _run(docker_command("logs", "--tail", "200", maria_name), timeout=20.0)
                 detail = (logs["stderr"] or logs["stdout"] or "logs indisponíveis")[-4000:]
                 message = (restore_maria["stderr"] or restore_maria["stdout"] or "sem detalhe")[-2000:]
                 raise RuntimeError(f"restauração MariaDB falhou: {message}; logs do alvo: {detail}")
@@ -247,7 +255,7 @@ def execute_drill(postgres_artifact: Path, mariadb_artifact: Path, policy: dict[
             }
     finally:
         for name in reversed(created):
-            _run(["docker", "rm", "-f", name], timeout=20.0)
+            _run(docker_command("rm", "-f", name), timeout=20.0)
 
 
 def build_plan(args: argparse.Namespace) -> dict[str, Any]:

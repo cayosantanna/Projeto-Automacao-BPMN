@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_POLICY_PATH = Path(__file__).with_name("politica_operacional_v1.json")
 ALLOWED_LOAD_PATHS = {"/health", "/healthz", "/v1/classify", "/v1/deduplicate", "/v1/embed"}
+LOCAL_DOCKER_CONTEXT = "desktop-linux"
 
 
 def utc_now() -> str:
@@ -324,6 +325,8 @@ def evaluate_drift(
             "status": "INSUFFICIENT_DATA",
             "sample_size": {"reference": ref_n, "current": cur_n},
             "scientific_result": False,
+            "automatic_stop_enforced": False,
+            "enforcement_scope": "READ_ONLY_DIAGNOSTIC_NO_RUNTIME_ACTUATION",
             "checks": [],
         }
 
@@ -347,6 +350,10 @@ def evaluate_drift(
     numeric_reference = reference.get("numeric_histograms", {})
     numeric_current = current.get("numeric_histograms", {})
     for name in sorted(set(numeric_reference) & set(numeric_current)):
+        ref_bins, cur_bins = numeric_reference[name], numeric_current[name]
+        if not ref_bins or not cur_bins or sum(ref_bins) <= 0 or sum(cur_bins) <= 0:
+            checks.append({"feature": name, "metric": "psi", "value": None, "status": "INSUFFICIENT_DATA"})
+            continue
         value = population_stability_index(
             numeric_reference[name], numeric_current[name], epsilon=epsilon
         )
@@ -364,6 +371,8 @@ def evaluate_drift(
             "status": "INCOMPATIBLE_SNAPSHOTS",
             "sample_size": {"reference": ref_n, "current": cur_n},
             "scientific_result": False,
+            "automatic_stop_enforced": False,
+            "enforcement_scope": "READ_ONLY_DIAGNOSTIC_NO_RUNTIME_ACTUATION",
             "checks": [],
             "interpretation_limit": (
                 "Os snapshots não possuem variáveis comparáveis em comum; não é permitido "
@@ -372,16 +381,20 @@ def evaluate_drift(
         }
     final = "STOP" if any(row["status"] == "STOP" for row in checks) else "WARN" if any(
         row["status"] == "WARN" for row in checks
-    ) else "PASS"
+    ) else "INSUFFICIENT_DATA" if any(row["status"] == "INSUFFICIENT_DATA" for row in checks) else "PASS"
     return {
         "status": final,
         "sample_size": {"reference": ref_n, "current": cur_n},
         "scientific_result": False,
+        "stop_requested": final == "STOP",
+        "automatic_stop_enforced": False,
+        "enforcement_scope": "READ_ONLY_DIAGNOSTIC_NO_RUNTIME_ACTUATION",
         "checks": checks,
         "interpretation_limit": (
             "Drift detecta mudança de distribuição; não demonstra queda de acurácia. "
-            "STOP aciona bloqueio automático; por decisão do projeto não há revisão humana "
-            "nem autorização para retreinamento automático."
+            "STOP indica que o limite de parada foi atingido; esta avaliação e o coletor "
+            "somente leem dados e não aplicam bloqueio automático no runtime. "
+            "Não há autorização para retreinamento automático."
         ),
     }
 
@@ -607,6 +620,8 @@ def collect_live_point_in_time(root: Path = ROOT) -> dict[str, Any]:
     docker = run_command_read_only(
         [
             "docker",
+            "--context",
+            LOCAL_DOCKER_CONTEXT,
             "inspect",
             "--format",
             "{{.Name}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}",
@@ -617,13 +632,29 @@ def collect_live_point_in_time(root: Path = ROOT) -> dict[str, Any]:
         ]
     )
     container_rows = [row for row in docker["stdout"].splitlines() if row]
+    expected_containers = {"glpi", "glpi-db", "glpi-dedup-db", "n8n"}
+    container_states: dict[str, tuple[str, str]] = {}
+    for row in container_rows:
+        parts = row.lstrip("/").split("|", 2)
+        if len(parts) == 3:
+            container_states[parts[0]] = (parts[1], parts[2])
+    docker_ok = (
+        docker["returncode"] == 0
+        and set(container_states) == expected_containers
+        and all(
+            status == "running" and health in {"healthy", "none"}
+            for status, health in container_states.values()
+        )
+    )
+    http_ok = all(200 <= int(row["status"]) < 300 for row in probes.values())
     return {
-        "status": "PASS" if all(200 <= int(row["status"]) < 300 for row in probes.values()) else "FAIL",
+        "status": "PASS" if http_ok and docker_ok else "FAIL",
         "evidence_status": "POINT_IN_TIME_TECHNICAL_EVIDENCE",
         "scientific_result": False,
         "collected_at": utc_now(),
         "http_probes": probes,
         "containers": container_rows,
+        "docker_healthy": docker_ok,
         "docker_probe_error": docker["stderr"] or None,
         "interpretation_limit": "Uma coleta pontual não mede disponibilidade na janela do SLO.",
     }

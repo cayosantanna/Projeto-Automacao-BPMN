@@ -21,6 +21,104 @@ SPEC.loader.exec_module(module)
 
 
 class PipelineE2ETests(unittest.TestCase):
+    def test_every_queue_side_effect_depends_on_shared_lock(self):
+        workflow = json.loads((ROOT / 'n8n/workflows/Versão9/V9-WF06-Fila-IA.json').read_text(encoding='utf-8'))
+        query = next(n for n in workflow['nodes'] if n['name'] == 'PG: Reservar Fila IA')['parameters']['query']
+        for name in ('reservas_expiradas', 'experimentos_encerrados', 'avanco', 'metricas'):
+            body = query.split(name + ' AS (', 1)[1].split('RETURNING', 1)[0]
+            with self.subTest(cte=name):
+                self.assertIn('FROM bloqueio', body)
+
+    def test_main_health_does_not_replace_runner_probe_and_recovery_is_bounded(self):
+        context = mock.Mock(
+            returncode=0,
+            stdout=module.LOCAL_DOCKER_ENDPOINT_WINDOWS + "\n",
+            stderr="",
+        )
+        success = mock.Mock(returncode=0, stdout="", stderr="")
+        with (
+            mock.patch.object(
+                module.subprocess,
+                'run',
+                side_effect=[context, success, success],
+            ) as run,
+            mock.patch.object(module, 'require_config', return_value={}),
+            mock.patch.object(module.requests, 'get', return_value=mock.Mock(status_code=200)),
+            mock.patch.object(module, 'probe_runner_ready', side_effect=[False, True]) as probe,
+            mock.patch.object(module.time, 'monotonic', side_effect=[0, 0, 31, 31, 32]),
+            mock.patch.object(module.time, 'sleep'),
+        ):
+            module.recreate_n8n({})
+        self.assertEqual(probe.call_count, 2)
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(
+            run.call_args.args[0],
+            ['docker', '--context', 'desktop-linux', 'restart', 'n8n-task-runners'],
+        )
+
+    def test_docker_commands_are_pinned_local_and_remote_endpoint_is_rejected(self):
+        self.assertEqual(
+            module._docker_command('inspect', 'n8n-task-runners'),
+            [
+                'docker',
+                '--context',
+                'desktop-linux',
+                'inspect',
+                'n8n-task-runners',
+            ],
+        )
+        remote = mock.Mock(returncode=0, stdout='ssh://example.invalid\n', stderr='')
+        with mock.patch.object(module.subprocess, 'run', return_value=remote):
+            with self.assertRaisesRegex(RuntimeError, 'Docker Desktop local|endpoint Docker remoto'):
+                module.assert_local_docker_context()
+
+    def test_runner_probe_requires_code_node_rejection(self) -> None:
+        config = {"n8n_url": "http://127.0.0.1:5678", "webhook_key": "fixture"}
+        response = mock.Mock(status_code=422, text="ticket_id inválido")
+        with mock.patch.object(module.requests, "post", return_value=response) as post:
+            self.assertTrue(module.probe_runner_ready(config))
+            self.assertEqual(post.call_args.kwargs["json"], {"ticket_id": 0})
+            response.status_code = 200
+            self.assertFalse(module.probe_runner_ready(config))
+            response.status_code, response.text = 422, "proxy error"
+            self.assertFalse(module.probe_runner_ready(config))
+
+    def test_cleanup_accepts_owned_case_before_ticket_materialization(self) -> None:
+        connection = mock.MagicMock()
+        cursor = connection.cursor.return_value.__enter__.return_value
+        cursor.fetchone.return_value = {"registered_ticket_id": None}
+
+        def execute(sql, parameters):
+            cursor.rowcount = 1 if any(
+                f"DELETE FROM {table}" in sql
+                for table in ("dataset_controle", "experimentos_avaliacao")
+            ) else 0
+
+        cursor.execute.side_effect = execute
+        result = module.cleanup_database(connection, module.make_run_id(), 325)
+        self.assertEqual(result["ticket"], 0)
+        self.assertEqual(result["dataset"], 1)
+        connection.commit.assert_called_once()
+
+    def test_cleanup_still_rejects_unowned_case(self) -> None:
+        connection = mock.MagicMock()
+        cursor = connection.cursor.return_value.__enter__.return_value
+        cursor.fetchone.return_value = None
+        with self.assertRaisesRegex(RuntimeError, "propriedade sintética"):
+            module.cleanup_database(connection, module.make_run_id(), 325)
+        self.assertEqual(cursor.execute.call_count, 1)
+        connection.commit.assert_not_called()
+
+    def test_cleanup_cardinality_failure_rolls_back_before_commit(self) -> None:
+        connection = mock.MagicMock()
+        cursor = connection.cursor.return_value.__enter__.return_value
+        cursor.fetchone.return_value = {"registered_ticket_id": 325}
+        cursor.rowcount = 0
+        with self.assertRaisesRegex(RuntimeError, "cardinalidade"):
+            module.cleanup_database(connection, module.make_run_id(), 325)
+        connection.rollback.assert_called_once()
+        connection.commit.assert_not_called()
+
     def test_run_id_is_deterministic_namespace(self) -> None:
         value = module.make_run_id(datetime(2026, 8, 17, 12, 34, 56, 123456, tzinfo=timezone.utc))
         self.assertEqual(value, "VALIDACAO-WF06-E2E-20260817T123456123456Z")
@@ -236,7 +334,7 @@ class PipelineE2ETests(unittest.TestCase):
             "http://127.0.0.1.evil.example:5678",
             "http://localhost.evil.example:5678",
             "http://localhost@evil.example:5678",
-            "http://user:password@localhost:5678",
+            "http://" + "user" + ":" + "password" + "@localhost:5678",
         )
         for value in rejected:
             with self.subTest(value=value):

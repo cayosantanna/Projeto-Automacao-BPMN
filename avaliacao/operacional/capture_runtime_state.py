@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -13,6 +14,8 @@ def _query(sql: str) -> list[str]:
     completed = subprocess.run(
         [
             "docker",
+            "--context",
+            "desktop-linux",
             "exec",
             "glpi-dedup-db",
             "sh",
@@ -47,13 +50,16 @@ def main() -> int:
         raise RuntimeError(f"Evidência já existe: {output}")
     queue = _query(
         "SELECT count(*) FILTER (WHERE triagem_status='ERRO_IA'), "
-        "count(*) FILTER (WHERE triagem_status IN ('PENDENTE_FILA_IA','FILA_IA_LIBERADA','PROCESSANDO_IA')) "
+        "count(*) FILTER (WHERE triagem_status IN ('PENDENTE_FILA_IA','FILA_IA_LIBERADA','PROCESSANDO_IA',"
+        "'CLASSIFICANDO_DUP','CLASSIFICANDO','AGUARDANDO_FILA_CLASSIFICACAO')), "
+        "(SELECT count(*) FROM fila_ia_dead_letter WHERE NOT resolvido) "
         "FROM tickets_processados"
     )[0].split("|")
-    dlq = int(_query("SELECT count(*) FROM fila_ia_dead_letter WHERE NOT resolvido")[0])
+    dlq = int(queue[2])
     payload = {
-        "schema_version": "1.0.0",
-        "status": "PASS" if queue == ["0", "0"] and dlq == 0 else "FAIL",
+        "schema_version": "1.1.0",
+        "collected_at": datetime.now(timezone.utc).isoformat(),
+        "status": "PASS" if queue[:2] == ["0", "0"] and dlq == 0 else "FAIL",
         "erro_ia": int(queue[0]),
         "active_queue": int(queue[1]),
         "open_dlq": dlq,

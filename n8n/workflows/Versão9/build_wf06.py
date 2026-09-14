@@ -20,7 +20,7 @@ from helpers import (
 
 DIR = Path(__file__).resolve().parent
 OUTPUT = DIR / "V9-WF06-Fila-IA.json"
-SNAPSHOT_SHA256 = "6e52189ecd5d46dea985a0071e37540d652bcd0aaf5434378b5a2257e74189cc"
+SNAPSHOT_SHA256 = "73a3b919c50c3975c7b9d8ff4e75cda38ed46715878e72a1bd3dfc6a6e0b6332"
 
 
 def schedule_trigger():
@@ -279,6 +279,7 @@ reservas_expiradas AS (
       fila_ultimo_erro='Reserva expirada; reenfileirado pelo WF06',
       ultima_acao_workflow='WF06_REENFILEIROU_RESERVA_EXPIRADA',
       atualizado_em=NOW()
+  FROM bloqueio
   WHERE t.triagem_status='FILA_IA_LIBERADA'
     AND COALESCE(t.fila_liberar_em,t.fila_reservada_em,t.atualizado_em)
         + (${lease} || ' seconds')::interval < NOW()
@@ -303,6 +304,7 @@ experimentos_encerrados AS (
         )
       ),
       atualizado_em=NOW()
+  FROM bloqueio
   WHERE t.triagem_status IN ('PENDENTE_FILA_IA','FILA_IA_LIBERADA')
     AND EXISTS (
       SELECT 1
@@ -437,6 +439,7 @@ avanco AS (
       intervalo_segundos=${intervalo},
       lote_tamanho=${lote},
       atualizado_em=NOW()
+  FROM bloqueio
   WHERE f.id=1
   RETURNING f.id
 ),
@@ -482,7 +485,7 @@ metricas AS (
       WHERE t.triagem_status IN ('PENDENTE_FILA_IA','FILA_IA_LIBERADA')
     ),
     ${intervalo},${lote}
-  FROM (SELECT 1) base
+  FROM bloqueio base
   LEFT JOIN marcados m ON TRUE
   LEFT JOIN dataset_controle dc ON dc.ticket_id=m.id
     AND (

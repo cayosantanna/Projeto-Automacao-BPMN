@@ -181,6 +181,8 @@ class V9ContractTests(unittest.TestCase):
         sql = parameters_text(self.wf06, "PG: Reservar Fila IA")
         for fragment in (
             "pg_advisory_xact_lock(9062026)",
+            "FROM bloqueio",
+            "FROM bloqueio base",
             "FOR UPDATE SKIP LOCKED",
             "GREATEST((SELECT tamanho FROM lote_efetivo) - COUNT(*)::int,0)",
             "fila_elegivel AS MATERIALIZED",

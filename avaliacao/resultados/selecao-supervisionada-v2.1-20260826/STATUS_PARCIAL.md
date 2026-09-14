@@ -37,6 +37,23 @@ há vencedor qualificado. O candidato provisório pela estimativa pontual foi:
 | Cobertura automática | 60,86% | 52,29%–68,95% |
 | Risco entre decisões automáticas | 6,93% | 2,29%–13,21% |
 
+Esses intervalos são bootstrap agrupado nominal de cada configuração. Como o
+candidato provisório foi escolhido exploratoriamente entre 35 configurações,
+eles não são intervalos pós-seleção nem foram ajustados para a busca múltipla.
+Os oito contrastes pré-especificados usam correção de Holm separadamente; isso
+não transforma o candidato de maior estimativa pontual em vencedor inferencial.
+
+### Proveniência da configuração
+
+Esta execução de 2026-08-26 foi congelada com
+`avaliacao/config/selecao_modelos_supervisionados_v2.json`, cujo SHA-256 é
+`3a58410ecbe440b3a759c2673a9f4de5e9329dcae78e18e7b1d2da6cdda73c3e`.
+A configuração posterior
+`avaliacao/config/selecao_classificacao_supervisionada_v2_1.json` (protocolo
+2.1.1, escopo apenas de classificação) é prospectiva e não é idêntica ao
+protocolo desta execução. Ela não deve ser usada para revalidar estes artefatos
+congelados.
+
 Foram observados zero encaminhamentos automáticos não-OBRA→OBRA em 64 grupos
 expostos, mas o limite superior unilateral de 95% foi 4,57%, acima do gate de
 2%. Zero observado não significa risco zero.
@@ -106,6 +123,12 @@ SHAP explicou o escore-base do candidato provisório com residual máximo de
 aditividade `5,77e-15`. A importância absoluta agregada foi 52,99% TF-IDF de
 caracteres, 29,64% TF-IDF de palavras e 17,37% embedding. Isso descreve o modelo
 ajustado; não prova causalidade nem correção.
+
+Fairness não foi avaliada: o corpus sintético não contém subgrupos
+institucionais válidos nem prevalências representativas. Qualquer análise de
+disparidade exige atributos autorizados, subgrupos pré-especificados, tamanho
+mínimo por grupo e rótulos humanos independentes. A ausência atual desses dados
+não pode ser interpretada como ausência de viés.
 
 No benchmark local de 20 registros, o candidato provisório teve p50 de 81,82 ms
 e p95 de 105,41 ms para texto bruto até predição-base, com encoder já carregado;

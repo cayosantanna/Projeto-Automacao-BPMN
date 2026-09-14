@@ -1,5 +1,10 @@
 # Auditoria crítica completa — 3 de setembro de 2026
 
+> Retificação em 09/09/2026: o coletor desta rodada reutilizava métricas de
+> 30 dias e snapshots históricos. As conclusões temporais de SLO/drift abaixo
+> foram invalidadas e substituídas pela auditoria de 09/09. A evidência original
+> permanece preservada; este documento não descreve o estado operacional atual.
+
 ## Parecer executivo
 
 O projeto está funcional como protótipo local e ambiente sintético isolado. A
@@ -23,8 +28,8 @@ independente elegível e nenhum resultado pode ser chamado de confirmatório.
 | Homologação | nove serviços, 40 tabelas, zero tickets e role runtime mínima | infraestrutura sintética, sem dados reais |
 | Carga C1 | 40/40 HTTP 200; 19,73 req/s; p95 35,30 ms | loopback e 40 requisições |
 | Carga C4 | 17/40 HTTP 200; 23/40 HTTP 429; p95 1.736,30 ms | saturação real do cenário; não ocultar |
-| Monitor | daemon oculto ativo; pelo menos quatro janelas versionadas e seis locais | todas falharam o SLO proposto |
-| Drift | janelas recentes em `STOP` por mudança da confiança | mudança distributiva não prova queda de acurácia |
+| Monitor | contagens de coletas preservadas | interpretação temporal invalidada; métricas repetidas de 30 dias |
+| Drift | diagnóstico histórico calculado repetidamente | não mede drift entre as janelas temporais |
 | Segredos | árvore candidata PASS/0; histórico FAIL/15 | rotacionar credenciais históricas |
 | Histórico | dez snapshots cobrem V1–V8 e passam integridade | versões antigas não são workflows ativos |
 | Regressão | 363 testes e 117 subtestes aprovados em 80,15 s | não substitui validação externa |
@@ -62,8 +67,8 @@ inferioridade semântica.
 
 ## Pontos fracos e pendências reais
 
-- os seis SLOs temporais locais falharam; a política permanece não aprovada;
-- o `STOP` de drift impede promoção automática e não autoriza retreinamento;
+- as métricas temporais legadas são insuficientes; a política permanece não aprovada;
+- o `STOP` de drift é diagnóstico somente leitura, sem bloqueio automático do runtime;
 - concorrência 4 satura o serviço local; pacing maior não é suportado;
 - deduplicação é subdimensionada e classificação permanece `UNDERPOWERED`;
 - sem gabarito independente, a correção semântica não pode ser confirmada;

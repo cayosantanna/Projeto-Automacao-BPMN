@@ -19,6 +19,8 @@ from pathlib import Path
 CANONICAL = {
     "README.md",
     "docs/SOURCE_OF_TRUTH.md",
+    "docs/auditoria_continuacao_2026-09-10.md",
+    "docs/politica_organizacao_retencao.md",
     "docs/auditoria_critica_completa_2026-09-01.md",
     "docs/auditoria_critica_completa_2026-08-26.md",
     "docs/resposta_professor_2026-08-26.md",

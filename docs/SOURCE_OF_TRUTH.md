@@ -1,6 +1,6 @@
 # Hierarquia das fontes de verdade
 
-**Estado:** canônico em 03/09/2026
+**Estado:** canônico em 14/09/2026
 **Escopo:** triagem GLPI, workflows V9, modelo local e avaliação científica
 
 Esta hierarquia impede que um texto, dashboard ou resultado antigo prevaleça
@@ -77,26 +77,42 @@ publicado, o resultado é invalidado, mesmo que um relatório diga `VALID`.
 - histórico: V1–V8 sanitizado/inativo em `n8n/history/`, V9 em
   `n8n/workflows/Versão9/`;
 - evidência E2E: sintética, isolada e não confirmatória;
-- evidência E2E final: `e2e-pipeline-local-v1.8.0-20260903-final.json`,
-  `passed=true` e cleanup completo;
-- estado operacional pós-E2E: zero `ERRO_IA`, zero fila ativa e zero DLQ
-  aberta; histórico reconciliado e preservado;
-- três partições aceleradas por proxy concluídas, sem sobreposição de grupos;
-  o coletor temporal acumulou ao menos quatro janelas completas no relatório
-  versionado e seis no estado local, todas com SLO proposto `FAIL`; janelas
-  recentes acionaram `STOP` de drift; `production_slo_estimated=false`;
-- homologação isolada revalidada em 03/09, com nove serviços e sem chamados
-  reais copiados;
-- navegador: seis workflows V9 publicados no n8n, execuções recentes do WF06
-  em `Success` e GLPI autenticado/listando chamados, sem mutação;
+- última recuperação E2E preservada:
+  `avaliacao/resultados/operacional/recuperacao-e2e-20260909.json`, com
+  `passed=true`, chamado sintético ausente, controlador/perfil restaurados e
+  nenhuma linha residual na DLQ da própria tentativa. Isso é evidência
+  histórica, não confirmação do estado vivo atual;
+- estado operacional final observado em 14/09 na captura SQL atômica
+  `avaliacao/resultados/operacional/estado-runtime-fechamento-homolog-20260914.json`:
+  `ERRO_IA=0`, fila ativa `=0` e DLQ aberta `=0`, sem exclusão de histórico.
+  Esta contagem não confirma correção semântica;
+- as três janelas técnicas intradiárias locais/sintéticas corrigidas foram
+  concluídas em 11/09 (240 observações cada e reconciliação completa), mas com
+  zero decisões únicas em cada uma. Drift é `INSUFFICIENT_DATA`; métricas de
+  latência, fila e erro sem decisões também permanecem insuficientes. A janela
+  1 falhou o SLO técnico proposto pela idade de restore de backup (206,05 h,
+  acima de 168 h); janelas 2 e 3 são `INSUFFICIENT_DATA`. Portanto
+  `production_slo_estimated=false` e nenhum SLO institucional foi demonstrado;
+- confirmação de 14/09: 53 testes operacionais e validação estática V9 aprovados;
+  daemon exato preservado. A série posterior contém lacuna de 44h33m12s,
+  fora das primeiras três janelas. Detalhes em
+  `docs/homologacao_v9_confirmacao_2026-09-14.md`;
+- última homologação isolada preservada em 09/09, com nove serviços e sem
+  chamados reais copiados; é evidência histórica, não estado vivo atual;
+- navegador: a evidência preservada de 09/09 registra seis workflows V9 e
+  acesso autenticado ao GLPI. A tentativa de 10/09 recebeu
+  `ERR_CONNECTION_REFUSED` em n8n e GLPI; validação visual atual está pendente;
 - segredo: árvore candidata `PASS` com zero achado; histórico alcançável `FAIL`
   com 15 achados que exigem rotação;
-- conclusão científica: bloqueada pela decisão de não produzir gabarito humano
-  independente nem revisão em pares; não abrir holdout confirmatório.
+- conclusão científica: avaliação apenas com rótulos proxy/sintéticos; não há
+  gabarito humano institucional independente, avaliação válida de equidade nem
+  holdout confirmatório. O candidato é `UNDERPOWERED` e não há base para
+  afirmar superioridade ou prontidão produtiva.
 
 ## Documentos canônicos
 
 - `README.md`
+- `docs/auditoria_continuacao_2026-09-10.md`
 - `docs/auditoria_critica_completa_2026-09-03.md`
 - `docs/auditoria_critica_completa_2026-09-02.md`
 - `docs/auditoria_critica_completa_2026-09-01.md`

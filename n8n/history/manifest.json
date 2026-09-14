@@ -262,7 +262,7 @@
       "source": {
         "path": "n8n/workflows/Teste01_v7final.json",
         "selected_workflow_sha256": "acf228af744f4ce3f327f706470eaf7d1d18c68c8082cb59e0c1fc7c9fbfb54b",
-        "source_file_sha256": "8a00e7532089479b7f541b0c7f5241078a65633e84ac7d3409d09a8740c31a94"
+        "source_file_sha256": "a2850e8999f2161bd504c966cc28bcef8551a7362b04f76efea1ef311f2d4c27"
       },
       "source_name": "Teste01_v7",
       "source_workflow_id": "TriagemV7Pg20260429",

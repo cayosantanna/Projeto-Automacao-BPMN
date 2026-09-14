@@ -47,6 +47,13 @@ class UpdateFailureSession:
 
 
 class TestDeployESegredos(unittest.TestCase):
+    def test_gateway_preserves_external_port_for_websocket_origin(self):
+        config = (ROOT / 'n8n/proxies/n8n-gateway.conf.template').read_text(encoding='utf-8')
+        self.assertEqual(config.count('proxy_set_header Host $http_host;'), 2)
+        self.assertEqual(config.count('proxy_set_header X-Forwarded-Host $http_host;'), 2)
+        self.assertNotIn('proxy_set_header Host $host;', config)
+        self.assertIn('proxy_set_header Upgrade $http_upgrade;', config)
+
     def test_env_normalizer_uses_runner_process_env_and_is_idempotent(self):
         source = (
             "const one=(typeof process !== 'undefined' && process.env.FOO) || 'x';\n"

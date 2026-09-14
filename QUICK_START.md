@@ -13,7 +13,7 @@ os arquivos reais.
 Na raiz do projeto:
 
 ```powershell
-docker compose -f glpi/docker-compose.yml up -d
+$env:COMPOSE_CONVERT_WINDOWS_PATHS=1; docker compose -f glpi/docker-compose.yml up -d
 docker compose -f n8n/docker-compose.yml up -d
 ./local_ai/scripts/start-local-ai.ps1 -CpuThreads 2 -MaxEmbedBatch 1
 ```

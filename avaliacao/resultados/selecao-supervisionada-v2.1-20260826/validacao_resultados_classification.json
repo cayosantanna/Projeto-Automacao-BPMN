@@ -1,6 +1,6 @@
 {
   "schema": "projeto-ic-validacao-resultados-selecao-v2",
-  "validated_at": "2026-09-03T03:50:27.239084+00:00",
+  "validated_at": "2026-09-10T16:00:19.452027+00:00",
   "status": "VALID_PARTIAL_TASK_SCOPE",
   "validated_tasks": [
     "classification"

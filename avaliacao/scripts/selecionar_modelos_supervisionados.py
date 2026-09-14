@@ -140,6 +140,10 @@ def validate_protocol_config(config: dict[str, Any]) -> None:
     except ValueError as exc:
         raise SelectionGuardError("protocol_version inválida") from exc
     dataset = config.get("dataset", {})
+    if not isinstance(dataset.get("allow_mixed_label_source_groups", False), bool):
+        raise SelectionGuardError("allow_mixed_label_source_groups deve ser booleano")
+    if dataset.get("allow_mixed_label_source_groups", False) and protocol_major < 3:
+        raise SelectionGuardError("Grupos-fonte multirrótulo exigem protocolo prospectivo V3")
     expected_group_field = (
         "source_dependency_group_sha256"
         if protocol_major >= 2
@@ -275,8 +279,11 @@ def validate_protocol_config(config: dict[str, Any]) -> None:
     for task, comparisons in paired.items():
         comparison_ids = [item.get("id") for item in comparisons]
         baselines = {item.get("baseline") for item in comparisons}
+        expected_comparison_count = (
+            4 if protocol_major >= 3 else (8 if task == "classification" else 10)
+        )
         if (
-            len(comparisons) != (8 if task == "classification" else 10)
+            len(comparisons) != expected_comparison_count
             or len(set(comparison_ids)) != len(comparisons)
             or len(baselines) != 1
         ):
@@ -295,6 +302,23 @@ def validate_protocol_config(config: dict[str, Any]) -> None:
             ):
                 raise SelectionGuardError(
                     f"Contraste pareado divergente: {comparison}"
+                )
+    if protocol_major >= 3:
+        execution_ids = config.get("execution_combination_ids")
+        if (
+            not isinstance(execution_ids, list)
+            or len(execution_ids) != 10
+            or len(set(execution_ids)) != len(execution_ids)
+            or set(execution_ids) - expected_combinations
+        ):
+            raise SelectionGuardError("Subconjunto V3 de dez combinações inválido")
+        for task in ALL_TASKS:
+            task_ids = [value for value in execution_ids if value.startswith(f"{task}__")]
+            if len(task_ids) != 5 or {
+                value.rsplit("__", 1)[-1] for value in task_ids
+            } != expected_classifiers:
+                raise SelectionGuardError(
+                    f"V3 deve comparar os cinco classificadores em {task}"
                 )
 
 
@@ -3777,6 +3801,7 @@ def build_samples(
     embedding_map: dict[str, np.ndarray] | None,
     classification_group_field: str,
     deduplication_group_field: str,
+    allow_mixed_label_source_groups: bool = False,
 ) -> tuple[
     list[dict[str, Any]],
     list[int],
@@ -3809,9 +3834,10 @@ def build_samples(
         raise SelectionGuardError(
             f"{classification_group_field} ausente em classificação"
         )
-    validate_group_label_purity(
-        class_labels, class_groups, context="classification"
-    )
+    if not allow_mixed_label_source_groups:
+        validate_group_label_purity(
+            class_labels, class_groups, context="classification"
+        )
 
     pairs = training.dedup_pairs(cases)
     pair_samples: list[dict[str, Any]] = []
@@ -3839,9 +3865,10 @@ def build_samples(
         raise SelectionGuardError(
             f"{deduplication_group_field} ausente em deduplicação"
         )
-    validate_group_label_purity(
-        pair_labels, pair_groups, context="deduplication"
-    )
+    if not allow_mixed_label_source_groups:
+        validate_group_label_purity(
+            pair_labels, pair_groups, context="deduplication"
+        )
     return (
         class_samples,
         class_labels,
@@ -4244,6 +4271,7 @@ def main() -> int:
         embedding_map=None,
         classification_group_field=classification_group_field,
         deduplication_group_field=deduplication_group_field,
+        allow_mixed_label_source_groups=config["dataset"].get("allow_mixed_label_source_groups", False),
     )
     feasibility_inputs = {
         "classification": (tfidf_samples[1], tfidf_samples[2]),
@@ -4297,8 +4325,15 @@ def main() -> int:
     retrieval_passages = [
         training.model_text(anchors_by_id[key]) for key in sorted(anchors_by_id)
     ]
+    frozen_execution_ids = set(config.get("execution_combination_ids", []))
+    frozen_embeddings = {
+        value.split("__")[2]
+        for value in frozen_execution_ids
+        if value.split("__")[2] != "none"
+    }
     selected_embedding_ids = set(
         args.embeddings
+        or frozen_embeddings
         or [item["id"] for item in config["embeddings"]]
     )
     specs = [
@@ -4361,10 +4396,16 @@ def main() -> int:
         print(f"Artefatos de embedding em {output_dir}", flush=True)
         return 0
 
-    classifiers = args.classificadores or [
+    frozen_classifiers = {
+        value.rsplit("__", 1)[-1] for value in frozen_execution_ids
+    }
+    frozen_representations = {
+        value.split("__")[1] for value in frozen_execution_ids
+    }
+    classifiers = args.classificadores or sorted(frozen_classifiers) or [
         item["id"] for item in config["classifiers"]
     ]
-    representations = args.representacoes or list(config["representations"])
+    representations = args.representacoes or sorted(frozen_representations) or list(config["representations"])
     results: list[dict[str, Any]] = []
     for representation in representations:
         representation_specification = config["representations"][representation]
@@ -4381,6 +4422,7 @@ def main() -> int:
                     embedding_map=embedding_maps[embedding_id]["symmetric"],
                     classification_group_field=classification_group_field,
                     deduplication_group_field=deduplication_group_field,
+                    allow_mixed_label_source_groups=config["dataset"].get("allow_mixed_label_source_groups", False),
                 )
             (
                 class_samples,
@@ -4409,6 +4451,11 @@ def main() -> int:
                 if task not in representation_specification["tasks"]:
                     continue
                 for classifier in classifiers:
+                    combination_id = "__".join(
+                        [task, representation, embedding_id or "none", classifier]
+                    )
+                    if frozen_execution_ids and combination_id not in frozen_execution_ids:
+                        continue
                     result = run_configuration(
                         task=task,
                         representation_id=representation,
@@ -4527,6 +4574,7 @@ def main() -> int:
                         embedding_map=embedding_maps[embedding_id]["symmetric"],
                         classification_group_field=classification_group_field,
                         deduplication_group_field=deduplication_group_field,
+                        allow_mixed_label_source_groups=config["dataset"].get("allow_mixed_label_source_groups", False),
                     )
                 )
                 if task == "classification":
@@ -4610,6 +4658,7 @@ def main() -> int:
                     embedding_map=embedding_maps[embedding_id]["symmetric"],
                     classification_group_field=classification_group_field,
                     deduplication_group_field=deduplication_group_field,
+                    allow_mixed_label_source_groups=config["dataset"].get("allow_mixed_label_source_groups", False),
                 )
             )
             if task == "classification":

@@ -47,6 +47,8 @@ RUN_RE = re.compile(r"^VALIDACAO-WF06-E2E-[0-9]{8}T[0-9]{12}Z$")
 MUTATION_CONFIRMATION = "EXECUTAR_E2E_SINTETICO_WF06_LOCAL_V18"
 QUEUE_LOCK_KEY = 9062026
 WF06_WORKFLOW_ID = "ZpQ0H9uV9Fila06"
+LOCAL_DOCKER_CONTEXT = "desktop-linux"
+LOCAL_DOCKER_ENDPOINT_WINDOWS = "npipe:////./pipe/dockerDesktopLinuxEngine"
 EXPECTED_CLASSIFICATION = "TRIAGEM_MANUAL"
 EXPECTED_TERMINAL = "TRIAGEM_MANUAL"
 ACTIVE_QUEUE_STATES = (
@@ -238,18 +240,54 @@ def verify_deployed_workflows(
     return evidence
 
 
-def _docker_environment() -> dict[str, str]:
+def _docker_command(*arguments: str) -> list[str]:
+    return ["docker", "--context", LOCAL_DOCKER_CONTEXT, *arguments]
+
+
+def assert_local_docker_context() -> str:
     process = subprocess.run(
         [
             "docker",
+            "context",
             "inspect",
+            LOCAL_DOCKER_CONTEXT,
             "--format",
-            "{{range .Config.Env}}{{println .}}{{end}}",
-            "n8n-task-runners",
+            "{{.Endpoints.docker.Host}}",
         ],
         capture_output=True,
         text=True,
         check=False,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        timeout=30,
+    )
+    endpoint = process.stdout.strip()
+    if process.returncode:
+        raise RuntimeError(
+            process.stderr.strip() or "Contexto Docker local não está disponível"
+        )
+    if os.name == "nt" and endpoint.lower() != LOCAL_DOCKER_ENDPOINT_WINDOWS.lower():
+        raise RuntimeError(
+            f"Contexto {LOCAL_DOCKER_CONTEXT} não aponta para o Docker Desktop local"
+        )
+    if endpoint.lower().startswith(("ssh://", "tcp://", "http://", "https://")):
+        raise RuntimeError("E2E recusou endpoint Docker remoto")
+    return endpoint
+
+
+def _docker_environment() -> dict[str, str]:
+    assert_local_docker_context()
+    process = subprocess.run(
+        _docker_command(
+            "inspect",
+            "--format",
+            "{{range .Config.Env}}{{println .}}{{end}}",
+            "n8n-task-runners",
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        timeout=30,
     )
     if process.returncode:
         raise RuntimeError(process.stderr.strip() or "Não foi possível inspecionar o runner externo")
@@ -324,37 +362,68 @@ def validate_scoped_profile(profile: dict[str, str], run_id: str) -> None:
 
 
 def recreate_n8n(profile: dict[str, str], timeout_seconds: float = 120.0) -> None:
+    assert_local_docker_context()
     environment = os.environ.copy()
     environment.update(profile)
     process = subprocess.run(
-        [
-            "docker",
+        _docker_command(
             "compose",
             "-f",
             str(ROOT / "n8n" / "docker-compose.yml"),
             "up",
             "-d",
             "--force-recreate",
+            "--no-deps",
             "n8n-task-runners",
-        ],
+        ),
         cwd=ROOT / "n8n",
         env=environment,
         capture_output=True,
         text=True,
         check=False,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        timeout=timeout_seconds,
     )
     if process.returncode:
         raise RuntimeError(process.stderr.strip() or "Falha ao recriar o runner externo")
     deadline = time.monotonic() + timeout_seconds
+    config = require_config()
+    restart_attempted = False
     while time.monotonic() < deadline:
         try:
             response = requests.get("http://127.0.0.1:5678/healthz", timeout=5)
-            if response.status_code < 400:
+            # healthz do processo principal não comprova registro/execução do
+            # runner. A entrada inválida percorre Code -> IF -> resposta 422,
+            # sem criar ticket GLPI ou alcançar nós PostgreSQL.
+            if response.status_code == 200 and probe_runner_ready(config):
                 return
         except requests.RequestException:
             pass
+        # Uma conexão de runner recusada durante startup pode permanecer presa
+        # apesar de o launcher estar vivo. Uma única reinicialização preserva
+        # perfil/volume e exige a mesma prova funcional, sem relaxar autenticação.
+        if not restart_attempted and time.monotonic() >= deadline - timeout_seconds + 30:
+            restart_attempted = True
+            restart = subprocess.run(
+                _docker_command("restart", "n8n-task-runners"),
+                capture_output=True, text=True, check=False,
+                timeout=min(30, max(1, deadline - time.monotonic())),
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            if restart.returncode:
+                raise RuntimeError("Falha na recuperação limitada do runner externo")
         time.sleep(2)
-    raise TimeoutError("n8n não ficou saudável no prazo")
+    raise TimeoutError("n8n/runner não comprovou execução da rota segura 422 no prazo")
+
+
+def probe_runner_ready(config: dict[str, str]) -> bool:
+    response = requests.post(
+        f"{config['n8n_url'].rstrip('/')}/webhook/glpi-ticket-fila-ia-v9",
+        headers={"X-Webhook-Key": config["webhook_key"]},
+        json={"ticket_id": 0},
+        timeout=15,
+    )
+    return response.status_code == 422 and response.text.strip() == "ticket_id inválido"
 
 
 def assert_profile_exact(expected: dict[str, str]) -> dict[str, str]:
@@ -935,16 +1004,23 @@ def cleanup_database(connection: Any, run_id: str, ticket_id: int) -> dict[str, 
     with connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT 1 FROM tickets_processados tp
-            JOIN dataset_controle dc ON dc.ticket_id=tp.id AND dc.run_id=%s
+            SELECT tp.id AS registered_ticket_id FROM dataset_controle dc
             JOIN experimentos_avaliacao e ON e.run_id=dc.run_id
-            WHERE tp.id=%s AND tp.titulo LIKE %s
+            LEFT JOIN tickets_processados tp ON tp.id=dc.ticket_id
+            WHERE dc.run_id=%s AND dc.ticket_id=%s
+              AND (tp.id IS NULL OR tp.titulo LIKE %s)
+              AND dc.origem='VALIDACAO_E2E_PIPELINE'
+              AND dc.observacao LIKE %s
               AND e.origem LIKE 'VALIDACAO_E2E_PIPELINE_%%'
             """,
-            (run_id, ticket_id, f"{TEST_PREFIX}%"),
+            (run_id, ticket_id, f"{TEST_PREFIX}%", f"{TEST_PREFIX} run_id={run_id}"),
         )
-        if cursor.fetchone() is None:
+        ownership = cursor.fetchone()
+        if ownership is None:
             raise RuntimeError("Cleanup bloqueado: propriedade sintética não comprovada")
+        # O ingresso pode falhar antes de materializar tickets_processados.
+        # A propriedade continua comprovada pelo caso e experimento sintéticos.
+        expected_ticket_count = int(_first_value(ownership) is not None)
         statements = (
             ("auto_confirmations", "DELETE FROM avaliacao_auto_confirmacoes WHERE run_id=%s", (run_id,)),
             ("human_reviews", "DELETE FROM avaliacoes_humanas WHERE run_id=%s", (run_id,)),
@@ -961,9 +1037,10 @@ def cleanup_database(connection: Any, run_id: str, ticket_id: int) -> dict[str, 
         for label, sql, parameters in statements:
             cursor.execute(sql, parameters)
             counts[label] = int(cursor.rowcount)
-    connection.commit()
-    if counts["dataset"] != 1 or counts["ticket"] != 1 or counts["experiment"] != 1:
+    if counts["dataset"] != 1 or counts["ticket"] != expected_ticket_count or counts["experiment"] != 1:
+        connection.rollback()
         raise RuntimeError(f"Cleanup cardinalidade inválida: {counts}")
+    connection.commit()
     return counts
 
 
