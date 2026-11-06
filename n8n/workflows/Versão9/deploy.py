@@ -19,6 +19,8 @@ DIR = Path(__file__).resolve().parent
 N8N_DIR = DIR.parents[1]
 PROJECT_DIR = DIR.parents[2]
 N8N_URL = "http://localhost:5678"
+LOCAL_DOCKER_CONTEXT = os.getenv("DOCKER_CONTEXT", "desktop-linux")
+os.environ["DOCKER_CONTEXT"] = LOCAL_DOCKER_CONTEXT
 
 SMTP_CRED = {
     "name": "SMTP Mailpit Local", "type": "smtp",
@@ -299,8 +301,11 @@ def deactivate_duplicate_webhooks(s, path, keep_id):
             deactivate_workflow(s, wid, wf.get("name", ""))
 
 def run(cmd, cwd=None):
-    print("[CMD] " + " ".join(cmd))
-    subprocess.run(cmd, cwd=cwd, check=True)
+    cmd_list = list(cmd)
+    if cmd_list and cmd_list[0] == "docker" and (len(cmd_list) < 2 or cmd_list[1] != "--context"):
+        cmd_list = ["docker", "--context", LOCAL_DOCKER_CONTEXT, *cmd_list[1:]]
+    print("[CMD] " + " ".join(cmd_list))
+    subprocess.run(cmd_list, cwd=cwd, check=True)
 
 def sh_quote(value):
     return "'" + str(value).replace("'", "'\"'\"'") + "'"
@@ -316,10 +321,10 @@ def copy_file_to_container(src, dest):
         data = f.read()
     dest_q = sh_quote(dest)
     cmd = [
-        "docker", "exec", "-i", "-u", "root", "n8n", "sh", "-lc",
+        "docker", "--context", LOCAL_DOCKER_CONTEXT, "exec", "-i", "-u", "root", "n8n", "sh", "-lc",
         f"cat > {dest_q} && chown node:node {dest_q} && chmod 0644 {dest_q}",
     ]
-    print("[CMD] docker exec -i -u root n8n sh -lc cat > " + dest)
+    print("[CMD] docker --context " + LOCAL_DOCKER_CONTEXT + " exec -i -u root n8n sh -lc cat > " + dest)
     subprocess.run(cmd, input=data, check=True)
 
 def deploy_via_docker_cli():

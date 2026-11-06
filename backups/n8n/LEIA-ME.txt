@@ -1,0 +1,14 @@
+PASTA BACKUPS/N8N
+=================
+
+Contém cópias de recuperação do serviço n8n.
+
+Arquivos:
+- n8n_db.sqlite: snapshot do banco interno do n8n em 25/06/2026; pode conter
+  workflows, credenciais cifradas e histórico de execuções.
+- LEIA-ME.txt: este inventário.
+
+Subpastas:
+- workflows-v9: snapshots JSON anteriores a deploys da V9.
+
+O banco SQLite é sensível e não deve ser publicado.

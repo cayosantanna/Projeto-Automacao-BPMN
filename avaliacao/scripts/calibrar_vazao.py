@@ -30,6 +30,9 @@ from project_env import configured_value, load_project_env  # noqa: E402
 
 load_project_env()
 
+LOCAL_DOCKER_CONTEXT = os.getenv("DOCKER_CONTEXT", "desktop-linux")
+os.environ["DOCKER_CONTEXT"] = LOCAL_DOCKER_CONTEXT
+
 import conferir_gabarito as checker  # noqa: E402
 import gerar_dataset_avaliacao as dataset  # noqa: E402
 from isolamento_experimentos import serialized_experiment  # noqa: E402
@@ -752,6 +755,8 @@ def compose_n8n(
     result = subprocess.run(
         [
             "docker",
+            "--context",
+            LOCAL_DOCKER_CONTEXT,
             "compose",
             "-f",
             str(ROOT / "n8n" / "docker-compose.yml"),
@@ -783,7 +788,7 @@ def compose_n8n(
 def capture_n8n_queue_profile() -> dict[str, Any]:
     """Capture only the non-secret live values that calibration may change."""
     result = subprocess.run(
-        ["docker", "inspect", "n8n", "--format", "{{json .Config.Env}}"],
+        ["docker", "--context", LOCAL_DOCKER_CONTEXT, "inspect", "n8n", "--format", "{{json .Config.Env}}"],
         capture_output=True,
         text=True,
         check=False,

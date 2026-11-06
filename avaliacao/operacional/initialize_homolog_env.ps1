@@ -4,6 +4,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$env:DOCKER_CONTEXT = 'desktop-linux'
+$env:COMPOSE_CONVERT_WINDOWS_PATHS = '1'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $n8nPath = Join-Path $root 'n8n\.env.homolog'
 $glpiPath = Join-Path $root 'glpi\.env.homolog'

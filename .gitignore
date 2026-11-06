@@ -23,6 +23,8 @@ venv/
 !**/.env.local.example
 api_key.txt
 **/api_key.txt
+docs/historico/HISTORICO_*.md
+docs/historico/DOSSIE_*.md
 
 # Bancos de dados e binarios pesados (> 100MB)
 *.sqlite
@@ -31,7 +33,6 @@ api_key.txt
 *.sqlite3-*
 *.db
 *.db-*
-backups/n8n/**
 glpi/backups/**
 local_ai/models/**
 !local_ai/models/manifest.json
@@ -45,6 +46,7 @@ n8n/workflows/all_credentials_export_runtime.json
 avaliacao/resultados/**/partials/
 avaliacao/resultados/**/execucao.stdout.log
 avaliacao/resultados/**/execucao.stderr.log
-avaliacao/runtime/monitoring/
+avaliacao/runtime/monitoring*/
 avaliacao/runtime/backups/
+avaliacao/runtime/*.log
 

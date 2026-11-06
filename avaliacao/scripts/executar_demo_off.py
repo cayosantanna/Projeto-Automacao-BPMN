@@ -14,13 +14,18 @@ COMPOSE = ROOT / "n8n" / "docker-compose.yml"
 GENERATOR = SCRIPT_DIR / "gerar_dataset_avaliacao.py"
 CHECKER = SCRIPT_DIR / "conferir_gabarito.py"
 VALIDATOR = ROOT / "n8n" / "workflows" / "Versão9" / "validate_v9_static.py"
+LOCAL_DOCKER_CONTEXT = os.getenv("DOCKER_CONTEXT", "desktop-linux")
+os.environ["DOCKER_CONTEXT"] = LOCAL_DOCKER_CONTEXT
 
 
 def run(command: list[str], *, env: dict[str, str] | None = None) -> None:
-    result = subprocess.run(command, cwd=ROOT, env=env, check=False)
+    cmd = list(command)
+    if cmd and cmd[0] == "docker" and (len(cmd) < 2 or cmd[1] != "--context"):
+        cmd = ["docker", "--context", LOCAL_DOCKER_CONTEXT, *cmd[1:]]
+    result = subprocess.run(cmd, cwd=ROOT, env=env, check=False)
     if result.returncode:
         raise RuntimeError(
-            f"Comando falhou ({result.returncode}): {' '.join(command)}"
+            f"Comando falhou ({result.returncode}): {' '.join(cmd)}"
         )
 
 
@@ -28,6 +33,8 @@ def queue_count() -> int:
     result = subprocess.run(
         [
             "docker",
+            "--context",
+            LOCAL_DOCKER_CONTEXT,
             "exec",
             "glpi-dedup-db",
             "psql",

@@ -24,9 +24,16 @@ EXPECTED = {
 }
 
 
+LOCAL_DOCKER_CONTEXT = os.getenv("DOCKER_CONTEXT", "desktop-linux")
+os.environ["DOCKER_CONTEXT"] = LOCAL_DOCKER_CONTEXT
+
+
 def _run(command: list[str], timeout: int = 30) -> subprocess.CompletedProcess[str]:
+    cmd = list(command)
+    if cmd and cmd[0] == "docker" and (len(cmd) < 2 or cmd[1] != "--context"):
+        cmd = ["docker", "--context", LOCAL_DOCKER_CONTEXT, *cmd[1:]]
     return subprocess.run(
-        command,
+        cmd,
         cwd=ROOT,
         capture_output=True,
         text=True,

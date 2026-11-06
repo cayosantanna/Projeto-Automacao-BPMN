@@ -117,9 +117,11 @@ que cada versão histórica era correta em produção. A V9 operacional fica em
 ## Reprodução essencial
 
 ```powershell
-# Infraestrutura
-docker compose -f glpi/docker-compose.yml up -d
-docker compose -f n8n/docker-compose.yml up -d
+# Infraestrutura (estritamente fixada no Docker Desktop local)
+$env:DOCKER_CONTEXT = "desktop-linux"
+$env:COMPOSE_CONVERT_WINDOWS_PATHS = 1
+docker --context desktop-linux compose -f glpi/docker-compose.yml up -d
+docker --context desktop-linux compose -f n8n/docker-compose.yml up -d
 
 # Serviço local operacional congelado
 ./local_ai/scripts/start-local-ai.ps1 -CpuThreads 2 -MaxEmbedBatch 1

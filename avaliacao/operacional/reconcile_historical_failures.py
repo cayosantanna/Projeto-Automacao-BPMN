@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +28,10 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+LOCAL_DOCKER_CONTEXT = os.getenv("DOCKER_CONTEXT", "desktop-linux")
+os.environ["DOCKER_CONTEXT"] = LOCAL_DOCKER_CONTEXT
+
+
 def _glpi_statuses(ticket_ids: list[int]) -> dict[int, int]:
     if not ticket_ids:
         return {}
@@ -34,6 +39,8 @@ def _glpi_statuses(ticket_ids: list[int]) -> dict[int, int]:
     sql = f"SELECT id,status FROM glpi_tickets WHERE id IN ({joined}) ORDER BY id;\n"
     command = [
         "docker",
+        "--context",
+        LOCAL_DOCKER_CONTEXT,
         "exec",
         "-i",
         "glpi-db",

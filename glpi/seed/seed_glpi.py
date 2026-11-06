@@ -935,8 +935,12 @@ def registrar_dataset_controle(rows: list[dict], args) -> None:
         print(f"  [OK] SQL dataset_controle salvo em: {path}")
 
     if args.registrar_dataset_controle:
+        docker_context = os.getenv("DOCKER_CONTEXT", "desktop-linux")
+        os.environ["DOCKER_CONTEXT"] = docker_context
         cmd = [
             "docker",
+            "--context",
+            docker_context,
             "exec",
             "-i",
             args.postgres_container,

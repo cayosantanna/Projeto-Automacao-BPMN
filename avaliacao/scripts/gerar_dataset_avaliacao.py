@@ -5,6 +5,7 @@ import csv
 import hashlib
 import importlib.util
 import json
+import os
 import random
 import subprocess
 import sys
@@ -23,6 +24,9 @@ if str(SCRIPT_DIR) not in sys.path:
 from project_env import configured_value, load_project_env  # noqa: E402
 
 load_project_env()
+
+LOCAL_DOCKER_CONTEXT = os.getenv("DOCKER_CONTEXT", "desktop-linux")
+os.environ["DOCKER_CONTEXT"] = LOCAL_DOCKER_CONTEXT
 
 SEED_GLPI_PATH = ROOT / "glpi" / "seed" / "seed_glpi.py"
 DEFAULT_DATASET_VERSION = "dataset-v2.0.0-episodico"
@@ -1901,6 +1905,8 @@ def experiment_sql(args, dataset_sha256: str) -> str:
 def run_dataset_sql(sql: str, args, quiet: bool = False) -> None:
     cmd = [
         "docker",
+        "--context",
+        LOCAL_DOCKER_CONTEXT,
         "exec",
         "-i",
         args.postgres_container,
@@ -1939,6 +1945,8 @@ def verify_dataset_registration(args, expected: int) -> None:
     )
     cmd = [
         "docker",
+        "--context",
+        LOCAL_DOCKER_CONTEXT,
         "exec",
         args.postgres_container,
         "psql",

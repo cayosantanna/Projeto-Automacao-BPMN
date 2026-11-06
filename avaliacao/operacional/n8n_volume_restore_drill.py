@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -33,9 +34,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+LOCAL_DOCKER_CONTEXT = os.getenv("DOCKER_CONTEXT", "desktop-linux")
+os.environ["DOCKER_CONTEXT"] = LOCAL_DOCKER_CONTEXT
+
+
 def _run(command: Sequence[str], *, timeout: float = 300.0) -> dict[str, Any]:
+    cmd = list(command)
+    if cmd and cmd[0] == "docker" and (len(cmd) < 2 or cmd[1] != "--context"):
+        cmd = ["docker", "--context", LOCAL_DOCKER_CONTEXT, *cmd[1:]]
     completed = subprocess.run(
-        list(command), capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=timeout, check=False,
     )
     return {"returncode": completed.returncode, "stdout": completed.stdout.strip(), "stderr": completed.stderr.strip()}
